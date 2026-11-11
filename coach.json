@@ -1,0 +1,10 @@
+{
+  "updated": "2026-11-11T00:00:00-06:00",
+  "demo": true,
+  "readiness": {
+    "rating": "unknown",
+    "note": "Demo mode: readiness comes from your private coach data."
+  },
+  "targets": {},
+  "message": "Demo mode: add a sync token in Settings to load your coach data."
+}
