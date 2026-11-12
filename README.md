@@ -51,6 +51,13 @@ Fix lifts already logged on the phone under the wrong id. Each entry is applied 
 ```
 The original is kept on the exercise as `orig`. Targets may also carry `kg` (for example `{ "w": 70, "kg": 32 }`); the card shows the kg number when the lift is in kg mode.
 
+### Coach food adds (`foodAdds`, v1.5.1)
+Push a food entry onto a day's log when the athlete couldn't log it in the app. Each entry is applied once (tracked in `S.fixes`, the same map as corrections) as a normal `S.meals` row, then syncs like any other entry. If the athlete later deletes it, it is not re-applied. The public demo `coach.json` has no `foodAdds`.
+```json
+{ "id": "2026-01-05-chipotle-bowl", "date": "2026-01-05", "meal": "dinner", "name": "Chipotle chicken bowl", "kcal": 1095, "p": 57, "c": 98, "f": 53 }
+```
+`meal` is `breakfast | lunch | dinner | snack | shake`. Optional `qty` (servings, default 1) and `note`. After publishing `coach.json` to the private data repo, a phone on v1.5.1+ picks it up on the next open. Bump the SW version when shipping this feature, not for later `foodAdds` payloads.
+
 ## v1.3: barcode scanner (Food tab)
 * **Scan a barcode** opens the rear camera (`getUserMedia`, `facingMode: environment`). It decodes EAN-13, EAN-8, UPC-A and UPC-E with the native `BarcodeDetector` where it exists (Chrome/Android). Otherwise, including iOS Safari, it uses the vendored ZXing library `vendor/zxing.min.js` (@zxing/library 0.21.3, Apache-2.0, see `vendor/ZXING-LICENSE`). That file is lazy-loaded on first scan and precached by the SW for offline use. A typed-code field and a "No barcode? Enter food by hand" button cover every failure (camera denied, no camera, no decoder).
 * Lookup: the local cache `S.scans[code]` first, then Open Food Facts v2 (`/api/v2/product/<code>.json`, trying the UPC-E→UPC-A and 12↔13-digit variants). Macros are read per serving when OFF has them, otherwise from per-100 g (scaled to `serving_quantity` when known, else a 100 g unit). If the product isn't found or has no macros, the same confirm sheet opens in manual mode, and what you type is cached under the code.
@@ -146,6 +153,11 @@ This uses `navigator.share` (the iOS share sheet) and falls back to the clipboar
 - **With a sync token** (Settings › Sync), the app reads both files through the GitHub Contents API (`Accept: application/vnd.github.raw`, `no-store`, cache-busting `?t=`) on open, on returning to the foreground (history at most every 10 min), on **Refresh coach data** and right after saving a token. The last good copies are cached in localStorage (`S.coachCache` and `mikecoach_hist`), so it works offline. The public demo files are never used on a phone with a token.
 - **Without a token**, the app loads the demo `coach.json` and `history.json` from this repo: no readiness, no targets, a few fake lifts, and "Demo mode: add a sync token in Settings to load your coach data."
 - `coach.json` `profile` overrides `PROGRAM.targets`, `PROGRAM.goal`, `PROGRAM.redRule`/`amberRule` and the name used in Send to Coach (`<name> → Coach`); program.js only has generic defaults.
-- Corrections are still applied once per `id` (tracked in `S.fixes`), whichever copy they come from.
+- Corrections and `foodAdds` are still applied once per `id` (tracked in `S.fixes`), whichever copy they come from.
 - Removing the token (or erasing the phone) drops the cached private copies and switches back to demo.
 - The coach publishes with `tools/push_coach.py` (outside this repo), which commits to the private repo.
+
+## v1.5.1: coach-pushed food entries
+
+- `coach.json` may include a `foodAdds` array. The app applies each item once into that date's food log (see **Coach food adds** above).
+- The public demo `coach.json` is unchanged (no `foodAdds`).

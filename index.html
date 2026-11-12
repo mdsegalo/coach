@@ -337,7 +337,7 @@ const COACH_DATA_FALLBACK = {
 /* ============================ storage ============================ */
 const LS_KEY = "mikecoach";
 const SCHEMA = 2;
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.5.1";
 
 function seedState() {
   return {
@@ -355,7 +355,7 @@ function seedState() {
     bodyweight: [],
     settings: { bar: 45, sound: true, gym: "std" },
     units: {},          // per-exercise weight unit preference: { farmer_carry: "kg" }
-    fixes: {},          // coach.json corrections already applied: { <id>: isoTime }
+    fixes: {},          // coach.json corrections / foodAdds already applied: { <id>: isoTime }
     scans: {},          // barcode cache: { <code>: { code, name, brand, img, unitLabel, unitG, kcal, p, c, f, last, used } }
     rest: null,
     coachCache: null,   // last good coach.json
@@ -419,7 +419,7 @@ function ghRaw(path) {
 function setCoach(j, src) {
   if (!j || typeof j !== "object") return;
   const changed = JSON.stringify(j) !== JSON.stringify(COACH) || S.coachSrc !== src;
-  COACH = j; S.coachCache = j; S.coachSrc = src; applyProfile(); applyCorrections(); save();
+  COACH = j; S.coachCache = j; S.coachSrc = src; applyProfile(); applyCorrections(); applyFoodAdds(); save();
   if (changed && !document.querySelector(".sheet.on")) render();
 }
 function loadCoach() {
@@ -854,6 +854,32 @@ function applyCorrections() {
   }
   if (n) { save(); setTimeout(() => toast(`Coach corrected ${n} lift${n > 1 ? "s" : ""} in your log`), 600); }
   return n;
+}
+/* ---- coach-pushed food entries from coach.json (foodAdds, v1.5.1) ----
+   { id, date, meal, name, kcal, p, c, f, qty?, note? } applied once per id (tracked in S.fixes)
+   as a normal S.meals row. Deleting the entry later does not re-apply it. Demo coach.json has no foodAdds. */
+function applyFoodAdds() {
+  const list = (COACH && Array.isArray(COACH.foodAdds)) ? COACH.foodAdds : [];
+  const labels = ["breakfast", "lunch", "dinner", "snack", "shake"];
+  S.fixes = S.fixes || {};
+  const added = [];
+  for (const a of list) {
+    if (!a || !a.id || S.fixes[a.id]) continue;
+    if (!a.date || !a.name) continue;
+    const label = String(a.meal || a.label || "snack").toLowerCase();
+    const servings = (a.qty != null && Number(a.qty) > 0) ? Number(a.qty) : (a.servings != null && Number(a.servings) > 0) ? Number(a.servings) : 1;
+    const rec = { id: uid("m"), date: a.date, label: labels.includes(label) ? label : "snack", foodId: null, name: a.name, servings, kcal: +a.kcal || 0, p: +a.p || 0, c: +a.c || 0, f: +a.f || 0, serving: a.serving || "1 serving" };
+    if (a.note) rec.note = a.note;
+    S.meals.push(rec);
+    S.fixes[a.id] = new Date().toISOString();
+    added.push(a.name);
+  }
+  if (added.length) {
+    save();
+    const msg = added.length === 1 ? `Coach added ${added[0]} to your food log` : `Coach added ${added.length} foods to your food log`;
+    setTimeout(() => toast(msg), 600);
+  }
+  return added.length;
 }
 /* keep lifts that already have logged sets when the gym toggle flips */
 function pinLogged() {
@@ -2016,6 +2042,7 @@ var BOOT_AT = Date.now();
 applyProfile();
 bootHistory();
 applyCorrections();
+applyFoodAdds();
 setInterval(() => { renderRest(); if (S.ui.tab === "workout") renderClock(); }, 500);
 render();
 loadCoach();

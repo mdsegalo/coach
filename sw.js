@@ -1,5 +1,5 @@
 /* Coach service worker. Bump VERSION when you change index.html/program.js so phones pick it up. */
-const VERSION = "coach-v1.5.0";
+const VERSION = "coach-v1.5.1";
 const SHELL = ["./", "index.html", "program.js", "coach.json", "history.json", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "vendor/zxing.min.js"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== VERSION).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
