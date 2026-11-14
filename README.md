@@ -14,7 +14,7 @@ On iPhone, open it in Safari, tap Share, then **Add to Home Screen**. It runs fu
 | `coach.json` | **Demo** `COACH_DATA` (no readiness, no targets). The real one lives in the private data repo (see v1.5) |
 | `sw.js` | Service worker: network-first with a 2.5 s timeout, cache fallback for the gym |
 | `manifest.webmanifest`, `icons/` | Install metadata and icons (192, 512, maskable 512, apple-touch 180) |
-| `src/` + `build.sh` | Optional: index.html split into parts. Edit `src/*` and run `./build.sh`, or just edit index.html |
+| `src/` + `build.sh` | Optional: index.html split into parts (`part4b.js` = v1.6 exercise library + picker). Edit `src/*` and run `./build.sh`, or just edit index.html |
 | `screens/` | Headless screenshots at 390×844 (not needed for hosting) |
 
 ## Updating COACH_DATA (coach.json)
@@ -161,3 +161,13 @@ This uses `navigator.share` (the iOS share sheet) and falls back to the clipboar
 
 - `coach.json` may include a `foodAdds` array. The app applies each item once into that date's food log (see **Coach food adds** above).
 - The public demo `coach.json` is unchanged (no `foodAdds`).
+
+## v1.6: add exercises on the fly
+
+- **+ Add exercise** sits at the bottom of every workout (Day A/B/C and the new **Extra** tab), above Finish. It opens a picker: a search bar on top (type-ahead, case-insensitive; every typed word must match the start of a word or a substring, and it understands DB/dumbbell, BB/barbell, KB/kettlebell, pushup/push-up), category chips, and a scrollable list grouped by category (chest, back, shoulders, arms, legs, glutes/hamstrings, core, bodyweight/calisthenics, kettlebell, Olympic/CrossFit, cardio/conditioning).
+- The built-in library `XLIB` (in `src/part4b.js`) has about 300 exercises. Rows whose id matches a program lift or a swap alt (for example `db_curl`, `pushup`, `back_squat`) reuse that id, so history, PRs and coach.json targets are shared. Other ids are slugs of the name (`air_squat`, `wall_ball`, `row_erg`).
+- **Create custom: "<typed text>"** shows whenever the query has no exact match. You pick how it's logged (weight, per hand, bodyweight, hold in seconds, carry in metres, or cardio as minutes + metres, calories or rounds). It's saved in `S.customEx` (`cx_<slug>`) and shows under **My exercises**. **Recent** (`S.recentEx`, last 15) is at the top when the search is empty.
+- A picked lift is appended to `draft.added` (ids in order). `planDay()` turns them into a final **Added** block (codes `+1`, `+2`…; 3 sets to start, or 1 for cardio), so they're normal cards: Last/Today/Why progression, the kg/lb switch, + / − set, rest timer, PR chips. **× Remove** drops one from the workout (after a confirm if sets are logged). A lift that's already in the workout is marked and refused. A gym swap that would collide with an added lift falls back to the slot's own lift.
+- Bodyweight moves (`bw`) leave weight blank ("BW") or take added load. Cardio (`unit: "time"`): the weight column is **minutes** and reps is metres, calories or rounds (export `Row (erg) 8.5 min / 2000 m`, day file `min: 8.5`, `w_lb: null`).
+- Sessions store added exercises with `added: true` (and `custom: true` in day files for custom ones). Send to Coach marks them `(added)`. They sync in `days/*.json` and `state.json` like everything else, and show in History, Progress charts (when e1RM applies) and the PR board.
+- **Extra** (day key `X`) is an off-rotation workout made only of added lifts, for rest days or extra conditioning. It saves and syncs like any session but never changes which A/B/C day is next.

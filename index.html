@@ -309,6 +309,20 @@ pre.share{white-space:pre-wrap;background:var(--card2);border-radius:12px;paddin
 .sumgrid>div{background:var(--card2);border-radius:12px;padding:10px 4px;text-align:center;min-width:0}
 .sumgrid b{display:block;font-size:22px;font-weight:800}
 .sumgrid span{font-size:11px;color:var(--dim);font-weight:600}
+/* v1.6 add exercise */
+.addex{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:56px;margin-top:18px;border-radius:16px;border:1.5px dashed #4a4a50;background:transparent;color:var(--acc);font-weight:800;font-size:16px}
+.addex .pl{font-size:24px;line-height:1;margin-top:-2px}
+.xpk{position:sticky;top:-8px;z-index:2;background:#1a1a1d;margin:0 -2px;padding:0 2px 6px}
+.xq{width:100%;margin-top:10px;background:var(--card2);border:1px solid var(--line);border-radius:12px;color:var(--text);font:inherit;font-size:17px;padding:12px 14px;outline:none;-webkit-appearance:none;appearance:none}
+.xq:focus{border-color:var(--acc)}
+.xcats{margin-top:8px;padding-bottom:2px}
+.xsec{margin-top:14px}
+.xcard{padding:0 14px;margin-top:6px}
+.xrow{min-height:52px}
+.xrow.in .plus{background:var(--card3);color:var(--acc)}
+.xrow.in{opacity:.6}
+.xnew .plus{background:var(--blue);color:#001018}
+.setops .rmx{flex:.8;color:var(--red)}
 </style>
 </head>
 <body>
@@ -337,7 +351,7 @@ const COACH_DATA_FALLBACK = {
 /* ============================ storage ============================ */
 const LS_KEY = "mikecoach";
 const SCHEMA = 2;
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.6.0";
 
 function seedState() {
   return {
@@ -356,6 +370,8 @@ function seedState() {
     settings: { bar: 45, sound: true, gym: "std" },
     units: {},          // per-exercise weight unit preference: { farmer_carry: "kg" }
     fixes: {},          // coach.json corrections / foodAdds already applied: { <id>: isoTime }
+    customEx: {},       // v1.6 exercises he created in the Add-exercise picker: { cx_<slug>: { name, type, created } }
+    recentEx: [],       // v1.6 recently added exercise ids, newest first (max 15)
     scans: {},          // barcode cache: { <code>: { code, name, brand, img, unitLabel, unitG, kcal, p, c, f, last, used } }
     rest: null,
     coachCache: null,   // last good coach.json
@@ -530,6 +546,8 @@ const ICON = {
 };
 
 /* ============================ program logic ============================ */
+/* v1.6 "Extra" workout: off-rotation session (rest day, extra conditioning) built only from added lifts. Not in PROGRAM.rotation, so it never moves A/B/C. */
+if (!PROGRAM.days.X) PROGRAM.days.X = { name: "Extra workout", focus: "Your own lifts", totalMin: 0, desc: "Log anything outside the A/B/C plan: a rest-day session, extra conditioning or a quick pump. It saves to History and syncs to your coach like any workout, and doesn't change which day is next.", shortOnTime: "", blocks: [] };
 function weekInfo(date) {
   const ws = PROGRAM.block.weeks;
   for (const w of ws) if (date >= w.start && date <= w.end) return w;
@@ -576,10 +594,12 @@ function exById(id) {
   let r = slotById(id);
   if (r) r = mergeVariant(r, id);
   else if ((PROGRAM.alts || {})[id]) { const h = homeSlot(id); r = h ? mergeVariant(h, id) : Object.assign({ id, sets: 3, reps: 10, range: [8, 12], rpe: "7", muscles: [] }, PROGRAM.alts[id]); }
-  return (_exCache[id] = r || null);
+  if (!r) r = xLookup(id);   // v1.6: Add-exercise library + custom exercises
+  if (r) _exCache[id] = r;     // misses aren't cached (a custom exercise may be created later)
+  return r || null;
 }
 /* Program lifts + every alt (for Progress charts / PR board) */
-function knownExercises() { const ids = allExercises().map(e => e.id).concat(Object.keys(PROGRAM.alts || {})); return [...new Set(ids)].map(exById).filter(Boolean); }
+function knownExercises() { const ids = allExercises().map(e => e.id).concat(Object.keys(PROGRAM.alts || {})); for (const s of S.sessions) for (const e of s.exercises || []) ids.push(e.id); return [...new Set(ids)].map(exById).filter(Boolean); }
 function gymMode() { return S.settings.gym === "crossfit" ? "crossfit" : "std"; }
 /* Which lift fills this slot today: explicit swap > CrossFit pick > plan */
 function choiceFor(slot, d) {
@@ -605,12 +625,13 @@ function planDay(day, date) {
   const wk = weekInfo(date || today());
   const amber = dayMode(day) === "amber";
   const dr = S.drafts[day]; const used = new Set();
-  return D.blocks.map(b => {
+  const addIds = addedIds(dr), reserved = new Set(addIds);
+  const blocks = D.blocks.map(b => {
     if (b.kind === "warmup") return Object.assign({}, b);
     let before = 0, after = 0;
     const items = b.items.map(slot => {
       let ex = mergeVariant(slot, choiceFor(slot, dr));
-      if (used.has(ex.id)) ex = mergeVariant(slot, slot.id);   // never the same lift twice in one day
+      if (used.has(ex.id) || (reserved.has(ex.id) && ex.id !== slot.id)) ex = mergeVariant(slot, slot.id);   // never the same lift twice in one day (added lifts keep their id)
       used.add(ex.id);
       let sets = ex.sets, rpe = ex.rpe;
       if (wk.sets) sets = Math.min(sets, wk.sets);
@@ -624,6 +645,20 @@ function planDay(day, date) {
     const minutes = after === before ? b.minutes : Math.max(2, Math.round(b.minutes * after / before));
     return Object.assign({}, b, { items, minutes });
   });
+  // v1.6: lifts added on the fly ("+ Add exercise") form a last block; set count is whatever he has on the card
+  const extra = [];
+  for (const id of addIds) {
+    if (used.has(id)) continue;
+    const base = exById(id); if (!base) continue;
+    used.add(id);
+    const e = dr && dr.ex[id];
+    let rpe = base.rpe || "7"; if (wk.rpeCap) rpe = capRpe(rpe, wk.rpeCap);
+    const sets = e && e.sets.length ? e.sets.length : base.unit === "time" ? 1 : 3;   // added lifts start at 3 sets; + / − on the card changes it
+    extra.push(Object.assign({}, base, { id, slot: id, swapped: false, slotName: undefined, added: true, code: "+" + (extra.length + 1), sets, baseSets: sets, rpe,
+      rest: base.rest != null ? base.rest : 90, reps: base.reps || 10, range: base.range || [8, 12], cues: base.cues || [], muscles: base.muscles || [] }));
+  }
+  if (extra.length) blocks.push({ id: day + "+", label: "Added", kind: "added", minutes: Math.max(2, extra.length * 3), items: extra });
+  return blocks;
 }
 function sortSessions(list) { return list.slice().sort((a, b) => (a.date + String(a.startedAt || 0).padStart(14, "0")).localeCompare(b.date + String(b.startedAt || 0).padStart(14, "0"))); }
 function nextDay() {
@@ -639,10 +674,14 @@ function historyFor(id) {
 }
 function topWeight(sets) { return sets.length ? Math.max(...sets.map(s => +s.w || 0)) : 0; }
 function e1rm(w, r) { w = +w; r = +r; if (!w || !r) return 0; return r === 1 ? w : w * (1 + r / 30); }
-function unitLabel(ex, kg) { const u = kg ? "kg" : "lb"; return !ex ? u : ex.unit === "lb/hand" ? u + "/hand" : ex.unit === "assist" ? "lb assist" : ex.unit === "band" ? "lb band" : u; }
+function unitLabel(ex, kg) { const u = kg ? "kg" : "lb"; return !ex ? u : ex.unit === "time" ? "min" : ex.unit === "lb/hand" ? u + "/hand" : ex.unit === "assist" ? "lb assist" : ex.unit === "band" ? "lb band" : u; }
+/* reps-column label: reps, metres, seconds, calories, rounds */
+function repLabel(ex, upper) { const m = { m: "Metres", s: "Seconds", cal: "Calories", rnds: "Rounds" }; const l = (ex && m[ex.repUnit]) || (ex && ex.repUnit ? cap(ex.repUnit) : "Reps"); return upper ? l.toUpperCase() : l; }
+function dayName(k) { return k === "X" ? "Extra" : "Day " + k; }
 function repsTxt(ex, n) { return n + (ex.repUnit ? " " + ex.repUnit : ""); }
 function setsLine(sets, ex) {
   if (!sets.length) return "";
+  if (ex && ex.unit === "time") return sets.map(s => [s.w != null && s.w !== "" ? fmtN(s.w) + " min" : "", s.r != null && s.r !== "" ? fmtN(s.r) + " " + (ex.repUnit || "") : ""].filter(Boolean).join(" / ")).join(", ");
   const ws = sets.map(wTxt), same = ws.every(w => w === ws[0]);
   const reps = sets.map(s => fmtN(s.r) + (ex && ex.repUnit ? ex.repUnit : ""));
   if (same) return ws[0] + "×" + reps.join(", ");
@@ -656,6 +695,7 @@ function progression(ex, wk) {
   const ct = COACH && COACH.targets && COACH.targets[ex.id];
   const base = n => Array.from({ length: ex.sets }, () => n);
   const pr = progressionCore(ex, wk, hist, last, lastInfo, ct, base);
+  if ((ex.bw || ex.unit === "time") && !pr.w && !pr.kg) { pr.w = null; delete pr.kg; }   // bodyweight: leave weight blank instead of 0
   // swapped lift with no log of its own: point at the slot's last log so he can pick a weight
   if (!pr.last && ex.swapped && pr.badge === "Find") { const sh = historyFor(ex.slot); const sl = sh[sh.length - 1]; if (sl) pr.why += ` Your last ${ex.slotName.toLowerCase()} was ${setsLine(doneSets(sl.ex), exById(ex.slot))} (${fmtDate(sl.date, false)}).`; }
   return pr;
@@ -693,7 +733,7 @@ function progressionCore(ex, wk, hist, last, lastInfo, ct, base) {
   const rpeOk = ls.every(s => s.rpe == null || s.rpe === "" || +s.rpe <= 8);
   if (allTop && rpeOk && !inc) {
     const reps = lastReps.map(r => r + step); while (reps.length < ex.sets) reps.push(reps[reps.length - 1] || hi);
-    return { w: lw, kg: lkg, reps: reps.slice(0, ex.sets), badge: "Harder", tone: "green", why: `Top of the range on every set. Make it harder (${ex.unit === "band" ? "lighter band" : "add load, a steeper angle or a slower tempo"}) or add ${step === 1 ? "a rep" : step + " " + (ex.repUnit || "reps")}.`, last: lastInfo };
+    return { w: lw, kg: lkg, reps: reps.slice(0, ex.sets), badge: "Harder", tone: "green", why: ex.unit === "time" ? `Top of the range last time. Go a bit farther or faster today.` : `Top of the range on every set. Make it harder (${ex.unit === "band" ? "lighter band" : "add load, a steeper angle or a slower tempo"}) or add ${step === 1 ? "a rep" : step + " " + (ex.repUnit || "reps")}.`, last: lastInfo };
   }
   if (allTop && rpeOk) {
     if (lkg != null) { const kg = lkg + incKg; return { w: lbOf(kg), kg, reps: base(lo), badge: "+" + incKg + " kg", tone: "green", why: `You hit ${repsTxt(ex, hi)} on every set at RPE 8 or less. Go up ${incKg} kg${ex.unit === "lb/hand" ? " per hand" : ""} (${fmtN(kg)} kg) and drop back to ${repsTxt(ex, lo)}.`, last: lastInfo }; }
@@ -950,6 +990,7 @@ function clockInfo(day) {
     return !blockDone(d, b);
   });
   if (cur < 0) cur = blocks.length - 1;
+  if (cur < 0) return null;   // Extra workout with nothing added yet
   const capS = PROGRAM.sessionCapMin * 60;
   const over = el - cums[cur] * 60;
   let tone = "green", st;
@@ -1025,18 +1066,24 @@ function viewWorkout() {
   const wk = weekInfo(d.date); const blocks = planDay(day, d.date); const mode = dayMode(day);
   const cnt = draftCounts(day);
   const ring = `<div class="ring" title="Sets done">${ringSvg(cnt.total ? cnt.done / cnt.total : 0, 50, 5, "var(--acc)")}<div class="c"><b class="num" style="font-size:15px">${cnt.done}</b><span class="muted num" style="font-size:9.5px">/${cnt.total}</span></div></div>`;
-  let h = header(`${fmtDate(d.date)} · Week ${wk.n}${wk.preview ? " preview" : ""}`, `Day ${day}`, ring);
+  let h = header(`${fmtDate(d.date)} · Week ${wk.n}${wk.preview ? " preview" : ""}`, esc(dayName(day)), ring);
   h += recoveryBanner(day);
   h += gymCard(day);
   if (COACH && COACH.message) h += `<div class="card coachmsg"><div class="avatar">C</div><div><div class="tiny muted" style="font-weight:800;letter-spacing:.07em">FROM COACH</div><div style="margin-top:2px;font-size:14.5px">${esc(COACH.message)}</div></div></div>`;
-  h += `<div class="seg">${PROGRAM.rotation.map(k => `<button class="${k === day ? "on" : ""}" data-act="day" data-v="${k}"><span class="d">Day ${k}</span><span class="s">${esc(PROGRAM.days[k].focus.split(" / ")[0])}</span>${S.drafts[k] && S.drafts[k].startedAt ? '<span class="next" style="background:var(--amber)">LIVE</span>' : k === nd ? '<span class="next">NEXT</span>' : ""}</button>`).join("")}</div>`;
+  h += `<div class="seg">${PROGRAM.rotation.map(k => `<button class="${k === day ? "on" : ""}" data-act="day" data-v="${k}"><span class="d">Day ${k}</span><span class="s">${esc(PROGRAM.days[k].focus.split(" / ")[0])}</span>${S.drafts[k] && S.drafts[k].startedAt ? '<span class="next" style="background:var(--amber)">LIVE</span>' : k === nd ? '<span class="next">NEXT</span>' : ""}</button>`).join("")}<button class="${day === "X" ? "on" : ""}" data-act="day" data-v="X"><span class="d">+</span><span class="s">Extra</span>${S.drafts.X && S.drafts.X.startedAt ? '<span class="next" style="background:var(--amber)">LIVE</span>' : ""}</button></div>`;
+  if (day === "X") {
+    const n = addedIds(d).length;
+    h += `<div class="card"><div class="row"><h2 class="grow">${esc(D.name)}</h2><span class="pill acc">${n} exercise${n === 1 ? "" : "s"}</span></div>
+      <div style="margin-top:8px;font-size:14px;color:#d2d2d7">${esc(D.desc)}</div>${!n ? `<div class="small muted" style="margin-top:8px">Tap <b>+ Add exercise</b> below to build it. The clock starts with your first logged set.</div>` : ""}</div>`;
+  } else {
   const planMin = mode === "amber" ? blocks.reduce((a, b) => a + b.minutes, 0) : (D.totalMin || blocks.reduce((a, b) => a + b.minutes, 0));
   h += `<div class="card"><div class="row"><h2 class="grow">${esc(D.name)}</h2><span class="pill ${mode === "amber" ? "amber" : "acc"}">~${planMin} min</span></div>
     <div class="small muted" style="margin-top:2px;font-weight:600">${esc(D.focus)} · ${esc(mode === "amber" ? "amber: RPE ≤7, last set dropped" : wk.label)}${gymMode() === "crossfit" ? ' · <span style="color:var(--blue)">CrossFit gym</span>' : ""}</div>
     <div style="margin-top:8px;font-size:14px;color:#d2d2d7">${esc(D.desc)}</div>
     <div class="small" style="margin-top:8px;color:var(--acc);font-weight:600">Week ${wk.n}: ${esc(wk.focus)}</div>
     <div class="callout"><span>⏱</span><span><b>Short on time?</b> ${esc(D.shortOnTime)}</span></div></div>`;
-  if (!d.startedAt) h += `<button class="btn acc" style="margin-top:14px;min-height:56px;font-size:17px" data-act="start">${ICON.play} Start workout · ${PROGRAM.sessionCapMin} min cap</button>`;
+  }
+  if (!d.startedAt && day !== "X") h += `<button class="btn acc" style="margin-top:14px;min-height:56px;font-size:17px" data-act="start">${ICON.play} Start workout · ${PROGRAM.sessionCapMin} min cap</button>`;
   const nx = upNext(day);
   blocks.forEach((b, bi) => {
     const last = b.items[b.items.length - 1];
@@ -1047,6 +1094,7 @@ function viewWorkout() {
     } else for (const ex of b.items) h += exCard(day, d, b, ex, wk, nx);
     h += `</section>`;
   });
+  h += `<button class="addex" data-act="add-ex"><span class="pl">+</span> Add exercise</button>`;
   h += `<div class="finish"><button class="btn acc" data-act="finish">${ICON.check} Finish workout</button>
     <div class="btns"><button class="btn" data-act="share" data-v="workout">${ICON.send} Send to Coach</button>${anyDone(d) || d.startedAt ? `<button class="btn danger" data-act="discard" style="flex:.55">Discard</button>` : ""}</div>
     <div class="tiny muted" style="text-align:center;margin-top:16px;line-height:1.5">Built on Nippard · RP/Israetel · Helms/SBS · Schoenfeld 2017 · Iversen 2021 · Dan John</div></div>`;
@@ -1073,18 +1121,20 @@ function exCard(day, d, b, ex, wk, nx) {
   const locked = e.sets.some(s => s.done) || (e.warm || []).some(w => w.done);
   const cfPick = (PROGRAM.crossfit || {})[slot.id];
   const optLabel = id => { const x = exById(id) || { name: id }; const g = (exById(id) || {}).gear; return x.name + (id === slot.id ? " (plan)" : "") + (id === cfPick ? " · CrossFit pick" : "") + (g ? " · needs " + g : ""); };
-  const swapSel = opts.length > 1 ? `<select class="swapsel" data-swap="${esc(slot.id)}" data-day="${day}" aria-label="Swap exercise" ${locked ? "disabled" : ""}>${opts.filter(id => id === ex.id || !usedElse.has(id)).map(id => `<option value="${esc(id)}" ${id === ex.id ? "selected" : ""}>${esc(optLabel(id))}</option>`).join("")}</select>` : "";
+  const swapSel = opts.length > 1 && !ex.added ? `<select class="swapsel" data-swap="${esc(slot.id)}" data-day="${day}" aria-label="Swap exercise" ${locked ? "disabled" : ""}>${opts.filter(id => id === ex.id || !usedElse.has(id)).map(id => `<option value="${esc(id)}" ${id === ex.id ? "selected" : ""}>${esc(optLabel(id))}</option>`).join("")}</select>` : "";
   const auto = ex.swapped && !(d.swap && d.swap[slot.id]);
+  const isTime = ex.unit === "time";
   let h = `<article class="ex ${doneAll ? "done" : ""} ${doneAll && !open ? "closed" : ""} ${isCur ? "current" : ""}" id="ex-${ex.id}">
     <div class="eh" ${doneAll ? `data-act="toggle-ex" data-id="${ex.id}"` : ""}><div class="code">${esc(ex.code)}</div><div class="grow"><div class="nmw ${swapSel ? "has" : ""} ${locked ? "lk" : ""}"><div class="nm">${esc(ex.name)}${swapSel ? `<span class="swp" aria-hidden="true">⇅</span>` : ""}</div>${swapSel}</div>
       ${ex.swapped ? `<div class="subfor">${auto ? '<span class="pill blue">CrossFit</span> ' : '<span class="pill blue">Swap</span> '}for ${esc(ex.slotName)}</div>` : ""}
+      ${ex.added ? `<div class="subfor"><span class="pill">Added</span> ${esc(XCAT_LABEL[xCat(ex.id)] || "")}</div>` : ""}
       <div class="meta"><b>${ex.sets} × ${esc(repsDisp)}</b><span>${/^\d/.test(ex.rpe) ? "RPE " : ""}${esc(ex.rpe)}</span><span>${esc(restTxt)}</span></div></div>
       ${doneAll ? `<span class="chev" style="transform:rotate(${open ? 180 : 0}deg)">${ICON.chev}</span>` : ""}</div>
-    <div class="sum"><span style="color:var(--acc)">✓</span> ${esc(setsLine(doneSets(e), ex))} ${doneSets(e).every(s => s.kg != null) ? esc(ex.unit === "lb/hand" ? "per hand" : "") : ul}</div>
+    <div class="sum"><span style="color:var(--acc)">✓</span> ${esc(setsLine(doneSets(e), ex))} ${isTime || (ex.bw && doneSets(e).every(s => s.w == null || s.w === "")) ? "" : doneSets(e).every(s => s.kg != null) ? esc(ex.unit === "lb/hand" ? "per hand" : "") : ul}</div>
     <div class="body">`;
   const lastTxt = pr.last ? `${fmtDate(pr.last.date, false)} · ${esc(setsLine(pr.last.sets, ex))}${pr.last.sets.some(s => s.rpe) ? " @" + pr.last.sets.map(s => fmtN(s.rpe) || "–").join(",") : ""}` : '<span class="muted">No app log yet</span>';
   const ctxB = btwbContext(ex.id);
-  const tW = tgt.w != null ? fmtN(tgtShow(e)) + " " + ul + (isKg ? ` (${fmtN(tgt.w)} lb)` : "") : "Find weight";
+  const tW = tgt.w != null ? fmtN(tgtShow(e)) + " " + ul + (isKg ? ` (${fmtN(tgt.w)} lb)` : "") : isTime ? "Your pace" : ex.bw ? "Bodyweight" : "Find weight";
   h += `<div class="prog"><span class="k">Last</span><span>${lastTxt}</span>
     <span class="k">Today</span><span class="tv num">${esc(tW)} × ${tgt.reps.slice(0, e.sets.length).map(r => fmtN(r)).join(", ")}${ex.repUnit ? " " + ex.repUnit : ""} <span class="pill ${pr.tone}">${esc(pr.badge)}</span></span>
     <span class="k">Why</span><span class="why">${esc(pr.why)}</span>${ctxB ? `<span class="k" style="color:var(--blue)">${esc(impLabel())}</span><span class="why" style="color:#9fd8ee">Best ${esc(ctxB)}</span>` : ""}</div>`;
@@ -1098,8 +1148,8 @@ function exCard(day, d, b, ex, wk, nx) {
     const m = S.machine[ex.id] || {};
     h += `<div class="mach"><span class="lab">MACHINE SETTINGS</span>${ex.machine.map(f => `<label><span>${esc(f)}</span><input data-mach="${ex.id}" data-f="${esc(f)}" value="${esc(m[f] || "")}" placeholder="–" maxlength="12" autocomplete="off" enterkeyhint="done"></label>`).join("")}</div>`;
   }
-  const colW = ex.unit === "lb/hand" ? (isKg ? "kg/hand" : "lb/hand") : ex.unit === "assist" ? "Assist" : ex.unit === "band" ? "Band lb" : isKg ? "kg" : "lb";
-  h += `<div class="sets"><div class="sr hd"><span>Set</span><span>${colW}</span><span>${ex.repUnit ? "Metres" : "Reps"}</span><span>RPE</span><span>Done</span></div>`;
+  const colW = isTime ? "Min" : ex.unit === "lb/hand" ? (isKg ? "kg/hand" : "lb/hand") : ex.unit === "assist" ? "Assist" : ex.unit === "band" ? "Band lb" : isKg ? "kg" : "lb";
+  h += `<div class="sets"><div class="sr hd"><span>Set</span><span>${colW}</span><span>${esc(repLabel(ex))}</span><span>RPE</span><span>Done</span></div>`;
   const prevBest = ex.e1rm === false ? 0 : bestE1rmBefore(ex.id, d.id);
   let runBest = prevBest;
   e.warm.forEach((w, i) => {
@@ -1114,12 +1164,12 @@ function exCard(day, d, b, ex, wk, nx) {
     const hasW = s.w != null && s.w !== "", hasR = s.r != null && s.r !== "";
     const sw = wShow(e, s);
     h += `<div class="sr ${s.done ? "dn" : ""} ${up ? "up" : ""}"><span class="n">${i + 1}${prTag}</span>
-      <button class="cell num ${hasW ? "" : "ph"}" data-act="pad" data-id="${ex.id}" data-i="${i}" data-f="w">${hasW ? fmtN(sw) : "—"}</button>
+      <button class="cell num ${hasW ? "" : "ph"}" data-act="pad" data-id="${ex.id}" data-i="${i}" data-f="w">${hasW ? fmtN(sw) : ex.bw ? "BW" : "—"}</button>
       <button class="cell num ${hasR ? "" : "ph"}" data-act="pad" data-id="${ex.id}" data-i="${i}" data-f="r">${hasR ? fmtN(s.r) : fmtN(tr)}</button>
       <button class="cell rpe num ${s.rpe ? "" : "ph"}" data-act="pad" data-id="${ex.id}" data-i="${i}" data-f="r">${s.rpe ? fmtN(s.rpe) : (/^\d/.test(ex.rpe) ? "@" + esc(String(ex.rpe).split("-")[0]) : "–")}</button>
       <button class="ck" data-act="ck" data-id="${ex.id}" data-i="${i}" aria-label="Set ${i + 1} done">${ICON.check}</button></div>`;
   });
-  h += `</div><div class="setops"><button data-act="add-set" data-id="${ex.id}">+ Add set</button><button data-act="rm-set" data-id="${ex.id}">− Remove set</button></div></div></article>`;
+  h += `</div><div class="setops"><button data-act="add-set" data-id="${ex.id}">+ Add set</button><button data-act="rm-set" data-id="${ex.id}">− Remove set</button>${ex.added ? `<button class="rmx" data-act="rm-ex" data-id="${esc(ex.id)}">× Remove</button>` : ""}</div></div></article>`;
   return h;
 }
 function findPlanEx(day, id) { for (const b of planDay(day, S.drafts[day].date)) if (b.kind !== "warmup") for (const ex of b.items) if (ex.id === id) return { b, ex }; return null; }
@@ -1182,13 +1232,14 @@ function openSetPad(day, id, i, field) {
   const d = S.drafts[day]; const e = d.ex[id]; const s = e.sets[i]; const { ex } = findPlanEx(day, id);
   const tr = e.target.reps[i] != null ? e.target.reps[i] : ex.reps;
   const isKg = e.u === "kg";
-  const wNudge = isKg ? ((ex.incKg || 2) >= 4 ? [-4, -2, 2, 4] : [-5, -2.5, 2.5, 5]) : ex.bar ? [-5, -2.5, 2.5, 5] : [-10, -5, 5, 10];
-  const wLab = ex.unit === "lb/hand" ? (isKg ? "KG / HAND" : "LB / HAND") : ex.unit === "assist" ? "ASSIST LB" : ex.unit === "band" ? "BAND LB" : isKg ? "WEIGHT KG" : "WEIGHT LB";
+  const isTime = ex.unit === "time";
+  const wNudge = isTime ? [-5, -1, 1, 5] : isKg ? ((ex.incKg || 2) >= 4 ? [-4, -2, 2, 4] : [-5, -2.5, 2.5, 5]) : ex.bar ? [-5, -2.5, 2.5, 5] : [-10, -5, 5, 10];
+  const wLab = isTime ? "MINUTES" : ex.bw && !isKg ? "ADDED LB (blank = BW)" : ex.bw ? "ADDED KG (blank = BW)" : ex.unit === "lb/hand" ? (isKg ? "KG / HAND" : "LB / HAND") : ex.unit === "assist" ? "ASSIST LB" : ex.unit === "band" ? "BAND LB" : isKg ? "WEIGHT KG" : "WEIGHT LB";
   openPad({
     title: `${ex.code} · ${ex.name}`,
-    sub: `Set ${i + 1} of ${e.sets.length} · target ${e.target.w != null ? fmtN(tgtShow(e)) + (isKg ? " kg" : "") + " × " : ""}${tr}${ex.repUnit ? " " + ex.repUnit : ""} @ RPE ${ex.rpe}`,
-    fields: [{ key: "w", label: wLab, value: wShow(e, s), nudge: wNudge, ph: "—" },
-             { key: "r", label: ex.repUnit ? "METRES" : "REPS", value: s.r != null ? s.r : "", nudge: ex.repUnit ? [-5, 5] : [-1, 1], ph: String(tr) }],
+    sub: `Set ${i + 1} of ${e.sets.length} · target ${e.target.w != null ? fmtN(tgtShow(e)) + (isTime ? " min" : isKg ? " kg" : "") + " × " : ""}${tr}${ex.repUnit ? " " + ex.repUnit : ""}${/^\d/.test(ex.rpe) ? " @ RPE " : " · "}${ex.rpe}`,
+    fields: [{ key: "w", label: wLab, value: wShow(e, s), nudge: wNudge, ph: ex.bw ? "BW" : "—" },
+             { key: "r", label: repLabel(ex, true), value: s.r != null ? s.r : "", nudge: ex.repStep && ex.repStep > 5 ? [-ex.repStep, ex.repStep] : ex.repUnit ? [-5, 5] : [-1, 1], ph: String(tr) }],
     active: field === "w" ? 0 : 1, nextFirst: field === "w", rpe: s.rpe != null ? s.rpe : null, okLabel: s.done ? "Save" : "Log set ✓",
     onClear: s.done ? () => { s.done = false; save(); render(); } : null,
     onOk: v => {
@@ -1215,7 +1266,7 @@ function draftToSession(day) {
     const warm = e.warm.filter(w => w.done).map(w => ({ w: w.w, r: w.r }));
     if (!sets.length && !warm.length) continue;
     if (ex.e1rm !== false && sets.length) { const pb = bestE1rmBefore(ex.id, d.id); const best = Math.max(...sets.map(s => e1rm(s.w, s.r))); if (pb > 0 && best > pb) prs++; }
-    exs.push(Object.assign({ id: ex.id, name: ex.name, sets, warm }, ex.swapped ? { slot: ex.slot } : {}));
+    exs.push(Object.assign({ id: ex.id, name: ex.name, sets, warm }, ex.swapped ? { slot: ex.slot } : {}, ex.added ? { added: true } : {}));
   }
   const end = Date.now(); const rt = rating();
   return { id: d.id, date: d.date, day, week: weekInfo(d.date).n, mode: dayMode(day), startedAt: d.startedAt, endedAt: end, durationMin: d.startedAt ? Math.round((end - d.startedAt) / 60000) : null, exercises: exs, notes: d.notes || "", prs, gym: gymMode(), rating: rt.stale ? "unknown" : rt.rating };
@@ -1224,7 +1275,7 @@ function openFinish() {
   const day = S.ui.day; const s = draftToSession(day); const st = sessionStats(s);
   if (!st.sets) { toast("Log at least one set first"); return; }
   const c = draftCounts(day);
-  sheet(`<h3>Finish Day ${day}</h3><div class="small muted">${fmtDate(s.date)} · ${c.done} of ${c.total} planned sets</div>
+  sheet(`<h3>Finish ${esc(dayName(day))}</h3><div class="small muted">${fmtDate(s.date)} · ${c.done} of ${c.total} planned sets</div>
     <div class="sumgrid"><div><b class="num">${s.durationMin != null ? s.durationMin : "–"}</b><span>minutes</span></div><div><b class="num">${st.sets}</b><span>sets</span></div><div><b class="num">${(st.volume / 1000).toFixed(1)}k</b><span>lb volume</span></div></div>
     ${s.prs ? `<div class="card" style="background:rgba(255,214,10,.1);color:#ffd60a;font-weight:700">🏆 ${s.prs} new estimated-1RM PR${s.prs > 1 ? "s" : ""}</div>` : ""}
     <label class="fld"><span>Notes for coach</span><textarea id="fin-notes" rows="3" placeholder="Energy, sleep, anything that hurt…">${esc(S.drafts[day].notes || "")}</textarea></label>
@@ -1243,10 +1294,11 @@ function finishSave(send) {
 
 /* ============================ Send to Coach ============================ */
 function workoutText(s) {
-  const L = [`Day ${s.day} · ${fmtDate(s.date)} · Wk ${s.week}${s.durationMin != null ? " · " + s.durationMin + " min" : ""}${s.mode === "amber" ? " · amber plan" : ""}${s.gym === "crossfit" ? " · crossfit gym" : ""}${s.rating && s.rating !== "unknown" ? " · " + s.rating : ""}`];
+  const L = [`${dayName(s.day)} · ${fmtDate(s.date)} · Wk ${s.week}${s.durationMin != null ? " · " + s.durationMin + " min" : ""}${s.mode === "amber" ? " · amber plan" : ""}${s.gym === "crossfit" ? " · crossfit gym" : ""}${s.rating && s.rating !== "unknown" ? " · " + s.rating : ""}`];
   for (const e of s.exercises) {
     const ex = exById(e.id) || { unit: "lb" }; const ds = doneSets(e);
     if (!ds.length) continue;
+    if (ex.unit === "time") { let tl = `${e.name} ${setsLine(ds, ex)}`; if (ds.some(x => x.rpe)) tl += " @" + ds.map(x => fmtN(x.rpe) || "-").join(","); L.push(tl + (e.added ? " (added)" : "")); continue; }
     const band = ex.unit === "band";
     const ws = ds.map(x => band && x.w ? fmtN(x.w) + "lb band" : wTxt(x)), same = ws.every(w => w === ws[0]);
     const sep = w => /[a-z]$/.test(w) && w !== "BW" ? " x" : "x";   // "28kg x40m", "135x6"
@@ -1255,6 +1307,7 @@ function workoutText(s) {
     let line = `${e.name} ` + (same ? `${ws[0]}${sep(ws[0])}${rr.join(",")}` : ds.map((x, i) => `${ws[i]}${sep(ws[i])}${rr[i]}`).join(", ")) + u;
     if (ds.some(x => x.rpe)) line += " @" + ds.map(x => fmtN(x.rpe) || "-").join(",");
     const m = S.machine[e.id]; if (m && Object.values(m).some(Boolean)) line += " [" + Object.entries(m).filter(([, v]) => v).map(([k, v]) => k + " " + v).join(", ") + "]";
+    if (e.added) line += " (added)";
     L.push(line);
   }
   if (s.notes) L.push("Notes: " + s.notes);
@@ -1586,6 +1639,300 @@ function openScanManual(code, msg, partial) {
   setTimeout(() => { const n = $("#scan-name"); if (n && !n.value) n.focus(); }, 350);
 }
 
+/* ============================ ADD EXERCISE (v1.6) ============================
+   "+ Add exercise" at the bottom of any workout (Day A/B/C or Extra) opens a searchable picker
+   over XLIB (built-in library) + S.customEx (exercises he created) with S.recentEx on top.
+   A picked lift is appended to draft.added (ids, in order) and becomes a normal card in a final
+   "Added" block from planDay(), so logging, rest timer, finish, sync (days/*.json), history,
+   Progress charts and the PR board all treat it like a programmed lift (keyed by its own id).
+   Library rows that match a program lift or swap alt reuse that id, so history is shared. */
+const XCATS = [
+  ["chest", "Chest"], ["back", "Back"], ["shoulders", "Shoulders"], ["arms", "Arms"], ["legs", "Legs"],
+  ["glutes", "Glutes / hamstrings"], ["core", "Core"], ["bw", "Bodyweight / calisthenics"], ["kb", "Kettlebell"],
+  ["oly", "Olympic / CrossFit"], ["cardio", "Cardio / conditioning"], ["custom", "My exercises"]
+];
+const XCAT_LABEL = Object.fromEntries(XCATS);
+const XCUE = {
+  load: ["Smooth, controlled reps through a full range", "Stop 1-3 reps short of failure (RPE 7-9)", "Same weight on every set until the top of the range"],
+  bw: ["Weight is optional: leave it blank for bodyweight", "Or enter added load (vest, plate, DB)", "Quality reps first, then add reps"],
+  band: ["Weight = the band's pull in lb (lighter band = harder on assisted moves)", "Control both directions"],
+  hold: ["Reps column is seconds held", "Weight is optional (blank = bodyweight)", "Breathe behind the brace"],
+  carry: ["Reps column is metres", "Stand tall, short quick steps", "Add distance to the top of the range, then add load"],
+  cardio: ["Weight column is minutes (decimals are fine: 1.75 = 1:45)", "Reps column is the distance or calories", "Easy days: conversational pace (Zone 2)"],
+  oly: ["Bar close, fast elbows", "Low reps, crisp technique: stop before form breaks", "Weight is the bar total"]
+};
+/* type -> defaults. unit "time": weight column = minutes, reps column = repUnit (m / cal). bw: weight optional. */
+const XT = {
+  bb:    { unit: "lb", bar: 45, inc: 5, reps: 8, range: [6, 10], rest: 120, cue: "load" },
+  bbl:   { unit: "lb", bar: 45, inc: 10, reps: 6, range: [5, 8], rest: 120, cue: "load" },
+  db:    { unit: "lb/hand", inc: 5, reps: 10, range: [8, 12], rest: 90, cue: "load" },
+  db1:   { unit: "lb", inc: 5, reps: 10, range: [8, 12], rest: 90, cue: "load" },
+  dbu:   { unit: "lb", inc: 5, reps: 10, range: [8, 12], rest: 75, repNote: "per side", cue: "load" },
+  kb:    { unit: "lb", inc: 5, incKg: 4, kgDefault: true, reps: 10, range: [8, 15], rest: 75, cue: "load" },
+  kbu:   { unit: "lb", inc: 5, incKg: 4, kgDefault: true, reps: 8, range: [6, 10], rest: 75, repNote: "per side", cue: "load" },
+  kb2:   { unit: "lb/hand", inc: 5, incKg: 4, kgDefault: true, reps: 8, range: [6, 10], rest: 90, cue: "load" },
+  cable: { unit: "lb", inc: 5, reps: 12, range: [10, 15], rest: 75, gear: "cable", machine: ["Pulley height"], cue: "load" },
+  mach:  { unit: "lb", inc: 10, reps: 12, range: [10, 15], rest: 90, gear: "machine", machine: ["Seat"], cue: "load" },
+  band:  { unit: "band", inc: 0, reps: 15, range: [12, 20], rest: 60, e1rm: false, cue: "band" },
+  bw:    { unit: "lb", inc: 0, bw: true, reps: 12, range: [8, 15], rest: 60, e1rm: false, cue: "bw" },
+  bwl:   { unit: "lb", inc: 5, bw: true, reps: 8, range: [5, 10], rest: 90, e1rm: false, cue: "bw" },
+  hold:  { unit: "lb", inc: 0, bw: true, repUnit: "s", reps: 30, range: [30, 60], repStep: 5, rest: 60, rpe: "Controlled", e1rm: false, cue: "hold" },
+  carry: { unit: "lb/hand", inc: 5, repUnit: "m", reps: 40, range: [40, 50], repStep: 5, rpe: "Heavy", rest: 60, e1rm: false, cue: "carry" },
+  carry1:{ unit: "lb", inc: 10, repUnit: "m", reps: 20, range: [20, 40], repStep: 5, rpe: "Hard", rest: 60, e1rm: false, cue: "carry" },
+  oly:   { unit: "lb", bar: 45, inc: 5, reps: 3, range: [2, 5], rest: 120, cue: "oly" },
+  olyl:  { unit: "lb", bar: 45, inc: 10, reps: 3, range: [2, 5], rest: 120, cue: "oly" },
+  ball:  { unit: "lb", inc: 0, reps: 15, range: [12, 25], rest: 60, e1rm: false, cue: "bw" },
+  cm:    { unit: "time", inc: 0, repUnit: "m", reps: 1000, range: [500, 2000], repStep: 100, rpe: "Easy-mod", rest: 60, e1rm: false, cue: "cardio" },
+  cc:    { unit: "time", inc: 0, repUnit: "cal", reps: 20, range: [15, 30], repStep: 2, rpe: "Hard", rest: 60, e1rm: false, cue: "cardio" },
+  cmin:  { unit: "time", inc: 0, repUnit: "rnds", reps: 1, range: [1, 5], repStep: 1, rpe: "Easy-mod", rest: 60, e1rm: false, cue: "cardio" }
+};
+const XMUS = { q: "quads", h: "hams", g: "glutes", b: "back", c: "chest", s: "shoulders", bi: "biceps", t: "triceps", co: "core" };
+const XCAT_MUS = { chest: "c t", back: "b bi", shoulders: "s", arms: "bi", legs: "q g", glutes: "g h", core: "co", bw: "", kb: "h g", oly: "q g b", cardio: "", custom: "" };
+/* "Name|type|id|muscles|aliases" (id blank = slug of the name; id of a program lift/alt = same lift) */
+const XLIB_SRC = {
+  chest: [
+    "Barbell bench press|bb|bb_bench", "DB bench press|db|db_bench", "Incline DB press|db|incline_db", "Incline barbell bench|bb|incline_bb_bench",
+    "Decline barbell bench|bb||c t", "Decline DB press|db||c t", "Close-grip bench press|bb||t c|cgbp", "Floor press (barbell)|bb||c t",
+    "DB floor press|db||c t", "Push-up|bw|pushup|c t|pushups press up", "Incline push-up|bw||c t|pushup", "Deficit push-up|bw||c t|pushup",
+    "Weighted push-up|bwl||c t|pushup vest", "Ring push-up|bw||c t|pushup", "DB fly|db|db_fly|c", "Incline DB fly|db||c", "Ring fly|bw|ring_fly|c",
+    "Cable fly (mid height)|cable|cable_fly|c|crossover", "Low-to-high cable fly|cable||c|crossover", "High-to-low cable fly|cable||c|crossover",
+    "Pec deck|mach||c|fly machine", "Machine chest press|mach||c t", "Smith machine bench press|mach||c t", "Landmine press|db1||c s",
+    "Svend press (plate)|db1||c", "Band chest press|band||c t", "DB pullover|db1||c b"
+  ],
+  back: [
+    "Barbell bent-over row|bb|bb_row|b bi", "Pendlay row|bb||b bi", "One-arm DB row|dbu|db_row|b bi|single arm", "Chest-supported DB row|db|cs_row|b bi|seal row incline row",
+    "Seal row|bb||b bi", "T-bar row|db1||b bi|landmine row", "Kroc row|dbu||b bi", "Seated cable row|cable|cable_row|b bi", "Single-arm cable row|cable||b bi",
+    "Lat pulldown|mach|lat_pulldown|b bi", "Close-grip pulldown|mach||b bi|neutral", "Straight-arm pulldown|cable||b|lat pushdown",
+    "Machine row|mach||b bi", "Assisted pull-up (machine)|mach|assisted_pullup|b bi", "Band-assisted pull-up|band|band_pullup|b bi", "Pull-up|bwl|pullup|b bi|pullups",
+    "Chin-up|bwl||b bi|chinup chinups", "Weighted pull-up|bwl||b bi", "Negative pull-up|bw||b bi|eccentric", "Ring row|bw|ring_row|b bi|inverted",
+    "Inverted row (bar)|bw||b bi", "Cable face pull|cable|face_pull|b s", "Band face pull|band|band_face_pull|b s", "Band pull-apart|band|band_pull_apart|b s",
+    "DB rear-delt fly|db|rear_delt_fly|b s", "Reverse pec deck|mach||b s|rear delt", "Barbell shrug|bb||b|traps", "DB shrug|db||b|traps",
+    "Back extension|bwl||b g h|hyperextension ghd", "Superman|bw||b|back"
+  ],
+  shoulders: [
+    "Standing DB overhead press|db|ohp_db|s t", "Barbell strict press|bb|bb_press|s t|ohp overhead military", "Seated DB shoulder press|db|seated_db_press|s t",
+    "Arnold press|db||s t", "Push press|bb||s t q|jerk", "Single-arm DB press|dbu||s t", "Machine shoulder press|mach||s t", "Landmine shoulder press|dbu||s t",
+    "DB lateral raise|db||s|side raise", "Cable lateral raise|cable||s|side raise", "Lean-away lateral raise|dbu||s", "DB front raise|db||s",
+    "Plate front raise|db1||s", "Upright row|bb||s b", "Cable Y-raise|cable||s", "Band lateral raise|band||s", "Band dislocates|band||s|pass through mobility",
+    "Handstand hold|hold||s co|wall", "Pike push-up|bw||s t|pushup", "Z press|bb||s t co", "Cuban press|db||s", "Bottoms-up KB press|kbu||s co"
+  ],
+  arms: [
+    "DB curl|db|db_curl|bi|biceps", "Barbell curl|bb|bb_curl|bi|biceps", "EZ-bar curl|db1||bi|biceps", "Hammer curl|db||bi|biceps", "Incline DB curl|db||bi|biceps",
+    "Preacher curl|db1||bi|biceps", "Concentration curl|dbu||bi|biceps", "Cable curl|cable|cable_curl|bi|biceps", "Bayesian cable curl|cable||bi|biceps",
+    "Band curl|band|band_curl|bi|biceps", "Spider curl|db||bi|biceps", "Reverse curl|db1||bi|forearm", "Zottman curl|db||bi|biceps forearm",
+    "Rope triceps pushdown|cable|pushdown|t|tricep", "Straight-bar pushdown|cable||t|tricep", "Band triceps pushdown|band|band_pushdown|t|tricep",
+    "Overhead cable triceps extension|cable||t|tricep", "Overhead DB triceps extension|db1||t|tricep", "DB skull crusher|db|db_skull|t|tricep lying extension",
+    "EZ-bar skull crusher|db1||t|tricep lying extension", "DB kickback|db||t|tricep", "Bench dip|bw||t|dips tricep", "Close-grip push-up|bw||t c|diamond pushup",
+    "Wrist curl|db||bi|forearm grip", "Dead hang|hold||b|grip forearm bar hang"
+  ],
+  legs: [
+    "Back squat|bbl|back_squat|q g", "Front squat|bbl|front_squat|q g", "Goblet squat|db1|goblet_squat|q g", "Heels-elevated goblet squat|db1|hs_goblet_squat|q",
+    "Safety-bar squat|bbl|ssb_squat|q g", "Box squat|bbl||q g", "Pause squat|bbl||q g", "Zercher squat|bbl||q g", "Overhead squat|oly||q g s|ohs",
+    "Air squat|bw||q g|bodyweight squat", "Jump squat|bw||q g", "Leg press|mach|leg_press|q g", "Hack squat (machine)|mach||q g", "Smith machine squat|mach||q g",
+    "Leg extension|mach|leg_ext|q", "DB split squat|db|split_squat|q g", "Bulgarian split squat|db|bulgarian|q g|bss rear foot elevated", "DB reverse lunge|db|reverse_lunge|q g",
+    "DB walking lunge|db||q g", "Barbell lunge|bb||q g", "Front-rack lunge|bb||q g", "Bodyweight lunge|bw||q g|lunges", "DB box step-up|db|step_up|q g",
+    "Lateral lunge|db1||q g|side lunge cossack", "Cossack squat|bw||q g", "Pistol squat|bw||q g|single leg", "Sissy squat|bw||q",
+    "Reverse sled drag|carry1|sled_drag|q", "Spanish squat (band)|band|spanish_squat|q", "Wall sit|hold||q", "Standing calf raise|mach||q|calves calf",
+    "Seated calf raise|mach||q|calves calf", "DB calf raise|db||q|calves calf", "Tibialis raise|bw||q|tib shin", "Sled push|carry1||q g|prowler"
+  ],
+  glutes: [
+    "Romanian deadlift|bbl|rdl|h g", "Trap-bar deadlift|bbl|trap_bar|h g q|hex bar", "Conventional deadlift|bbl|deadlift|h g", "Sumo deadlift|bbl|sumo_deadlift|g h q",
+    "DB Romanian deadlift|db|db_rdl|h g|rdl", "Single-leg DB RDL|db|sl_rdl|h g|rdl", "Stiff-leg deadlift|bbl||h g", "Deficit deadlift|bbl||h g",
+    "Rack pull|bbl||h g b|block pull", "Good morning|bb|good_morning|h g", "Barbell hip thrust|bbl|hip_thrust|g h", "DB hip thrust|db1||g h",
+    "Single-leg hip thrust|bw||g h", "Barbell glute bridge|bbl|glute_bridge|g h", "Glute bridge (bodyweight)|bw||g h|floor bridge",
+    "Single-leg glute bridge|bw||g h", "Seated leg curl|mach|leg_curl|h|hamstring curl", "Lying leg curl|mach||h|hamstring curl", "Slider / ring hamstring curl|bw|slider_leg_curl|h",
+    "Stability-ball leg curl|bw||h|swiss ball", "Band-assisted Nordic curl|band|nordic_curl|h", "Nordic curl|bw||h", "Cable pull-through|cable||g h",
+    "Cable glute kickback|cable||g", "Hip abduction machine|mach||g|abductor", "Hip adduction machine|mach||q|adductor", "Banded lateral walk|band||g|monster walk",
+    "Clamshell (band)|band||g", "Reverse hyper|mach||g h", "Frog pump|bw||g"
+  ],
+  core: [
+    "Pallof press|cable|pallof|co|anti rotation", "Band Pallof press|band|band_pallof|co|anti rotation", "Dead bug|bw|dead_bug|co", "Plank|hold||co",
+    "Side plank|hold||co", "Hollow hold|hold||co|hollow body", "Hollow rock|bw||co", "Bird dog|bw||co", "Bear crawl|carry1||co s", "Ab wheel rollout|bw||co|ab roller",
+    "Hanging knee raise|bw||co", "Hanging leg raise|bw||co", "Toes-to-bar|bw||co|t2b ttb", "Cable crunch|cable||co|abs", "Crunch|bw||co|abs sit up",
+    "Sit-up|bw||co|situp abmat", "GHD sit-up|bw||co", "V-up|bw||co", "Russian twist|bw||co", "Mountain climber|bw||co", "Woodchop (cable)|cable||co",
+    "Landmine rotation|db1||co", "Copenhagen plank|hold||co|adductor", "L-sit|hold||co", "Farmer carry|carry|farmer_carry|co|farmers walk",
+    "Suitcase carry|carry1|suitcase_carry|co", "Trap-bar carry|carry1|trapbar_carry|co", "Double KB front-rack carry|carry|rack_carry|co",
+    "Overhead carry|carry||co s|waiter walk", "Sandbag carry|carry1||co|bear hug"
+  ],
+  bw: [
+    "Burpee|bw||q c co|burpees", "Bar-facing burpee|bw||q c co", "Burpee box jump-over|bw||q g", "Box jump|bw||q g", "Box step-up (bodyweight)|bw||q g",
+    "Broad jump|bw||q g", "Dip|bwl||c t|dips", "Ring dip|bwl||c t|dips", "Muscle-up (bar)|bw||b c t|bmu", "Ring muscle-up|bw||b c t|rmu",
+    "Handstand push-up|bw||s t|hspu", "Kipping pull-up|bw||b bi", "Chest-to-bar pull-up|bw||b bi|c2b", "Rope climb|bw||b bi", "Legless rope climb|bw||b bi",
+    "Wall walk|bw||s co", "Inchworm|bw||co h", "Jumping jack|bw|||jumping jacks", "Double-under|bw|||du double unders jump rope", "Single-under|bw|||jump rope skipping",
+    "Walking lunge (bodyweight)|bw||q g", "Skater jump|bw||q g", "Tuck jump|bw||q", "Handstand walk|carry1||s co|metres", "Push-up to T|bw||c co", "Burpee pull-up|bw||b c"
+  ],
+  kb: [
+    "KB swing|kb|kb_swing|h g|russian swing", "American KB swing|kb||h g s", "Single-arm KB swing|kbu||h g", "KB goblet squat|kb||q g", "KB deadlift (double)|kb2|kb_deadlift|h g",
+    "KB single-leg deadlift|kbu||h g", "KB clean|kbu||h g", "Double KB clean|kb2||h g", "KB snatch|kbu||h g s", "Double KB press|kb2|kb_press|s t", "KB press (single)|kbu||s t",
+    "KB push press|kbu||s t", "KB Turkish get-up|kbu||co s|tgu", "KB windmill|kbu||co", "KB halo|kb||s co", "KB around the world|kb||co", "KB gorilla row|kb2||b bi",
+    "KB row|kbu||b bi", "Double KB front squat|kb2||q g", "KB thruster|kb2||q s", "KB clean and press|kbu||s h", "KB high pull|kb||b s", "KB lunge (front-rack)|kb2||q g",
+    "KB suitcase deadlift|kbu||h g co"
+  ],
+  oly: [
+    "Power clean|olyl||q g b", "Squat clean|olyl||q g b|full clean", "Hang power clean|oly||q g b|hpc", "Hang clean|oly||q g b", "Power snatch|oly||q g s",
+    "Squat snatch|oly||q g s|full snatch", "Hang power snatch|oly||q g s", "Clean and jerk|olyl||q g s", "Push jerk|oly||s t q", "Split jerk|oly||s t q", "Thruster|oly||q s|barbell thruster",
+    "DB thruster|db||q s", "Clean pull|olyl||h g b", "Snatch-grip deadlift|olyl||h g b", "Sumo deadlift high pull|oly||h g b s|sdhp", "DB snatch|dbu||h g s",
+    "DB hang clean|db||h g", "DB clean and jerk|dbu||s q", "Devil press|db||h s c", "Man maker|db||c s q", "Wall ball|ball||q s|wallballs wall-ball",
+    "Ball slam|ball||co s|slam ball med ball", "Sandbag clean|db1||h g", "D-ball over shoulder|db1||h g|atlas stone", "Cluster|oly||q g s|squat clean thruster"
+  ],
+  cardio: [
+    "Row (erg)|cm||| rower rowing concept2 c2", "Row for calories|cc|||rower rowing erg", "Bike erg|cm|||bikeerg cycle", "Assault / echo bike|cc|||airbike air bike airdyne",
+    "Stationary bike|cmin|||spin cycle", "Ski erg|cm|||skierg", "Run|cm|||running jog", "Treadmill run|cm|||running jog", "Incline treadmill walk|cmin|||walk",
+    "Walk|cmin|||walking zone 2", "Stair climber|cmin|||stairmaster stepmill", "Elliptical|cmin|||cross trainer", "Swim|cm|||swimming pool laps", "Jump rope (time)|cmin|||skipping",
+    "Shuttle run|cm|||sprint", "Sprint|cm|||run", "Sled push (conditioning)|cm|||prowler", "Battle ropes|cmin|||ropes", "Ruck|cm|||rucking weighted walk",
+    "Zone 2 cardio|cmin|||z2", "EMOM|cmin|||every minute", "AMRAP|cmin|||rounds as many", "Interval session|cmin|||intervals hiit", "Golf (walking)|cmin|||golf"
+  ]
+};
+function xslug(s) { return String(s).toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40); }
+function xdef(type, name, cat, mus, id) {
+  const T = XT[type] || XT.db1;
+  const o = Object.assign({ id, name, cat, xtype: type, sets: 3, rpe: "7", lib: true }, T);
+  delete o.cue; o.cues = XCUE[T.cue] || XCUE.load; o.range = T.range.slice();
+  o.muscles = String(mus != null && mus !== "" ? mus : XCAT_MUS[cat] || "").split(/\s+/).filter(Boolean).map(m => XMUS[m] || m);
+  if (o.machine) o.machine = o.machine.slice();
+  return o;
+}
+const XLIB = (() => {
+  const out = [], seen = {};
+  for (const [cat] of XCATS) for (const row of XLIB_SRC[cat] || []) {
+    const [name, type, id0, mus, alias] = row.split("|");
+    let id = id0 || xslug(name);
+    if (seen[id]) id = id + "_" + cat;
+    seen[id] = 1;
+    out.push({ id, name, cat, type, mus, alias: alias || "", own: !id0 });
+  }
+  return out;
+})();
+const XLIB_BY = Object.fromEntries(XLIB.map(x => [x.id, x]));
+/* exercise definition for a library or custom id (program lifts + alts resolve first, in exById) */
+function xLookup(id) {
+  const L = XLIB_BY[id];
+  if (L) return xdef(L.type, L.name, L.cat, L.mus, id);
+  const C = S && S.customEx && S.customEx[id];
+  if (C) { const o = xdef(C.type || "db1", C.name, "custom", C.mus || "", id); o.custom = true; return o; }
+  return null;
+}
+function xCat(id) { const L = XLIB_BY[id]; if (L) return L.cat; if (S.customEx && S.customEx[id]) return "custom"; const e = exById(id); return e && e.muscles && e.muscles[0] ? ({ chest: "chest", back: "back", shoulders: "shoulders", biceps: "arms", triceps: "arms", quads: "legs", hams: "glutes", glutes: "glutes", core: "core" })[e.muscles[0]] || "custom" : "custom"; }
+function xName(id) { const L = XLIB_BY[id]; if (L) return L.name; const C = S.customEx && S.customEx[id]; if (C) return C.name; const e = exById(id); return e ? e.name : id; }
+const XALIAS = [[/\bdb\b/, " dumbbell"], [/\bbb\b|barbell/, " bb barbell"], [/\bkb\b/, " kettlebell"], [/kettlebell/, " kb"], [/dumbbell/, " db"], [/\brdl\b/, " romanian"], [/push-up/, " pushup press-up"], [/pull-up/, " pullup"], [/chin-up/, " chinup"]];
+function xNorm(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); }
+const _xHay = {};
+function xHay(id) {
+  if (_xHay[id]) return _xHay[id];
+  const L = XLIB_BY[id]; const C = S.customEx && S.customEx[id];
+  let s = (xName(id) + " " + (L ? L.alias : "") + " " + (XCAT_LABEL[L ? L.cat : "custom"] || "") + (C ? " custom" : "")).toLowerCase();
+  for (const [re, add] of XALIAS) if (re.test(s)) s += add;
+  const n = xNorm(s); const r = { n, words: n.split(" "), compact: n.replace(/ /g, "") };
+  if (L) _xHay[id] = r;   // custom names can change on import; don't cache them
+  return r;
+}
+/* every typed word must match (prefix of a word, or a substring); returns a score (higher = better) or 0 */
+function xScore(id, q) {
+  const toks = xNorm(q).split(" ").filter(Boolean); if (!toks.length) return 1;
+  const H = xHay(id), nm = xNorm(xName(id));
+  let sc = 0;
+  for (const t of toks) {
+    if (H.words.some(w => w === t)) sc += 4;
+    else if (H.words.some(w => w.startsWith(t))) sc += 3;
+    else if (H.n.includes(t) || H.compact.includes(t)) sc += 1;
+    else return 0;
+  }
+  const qn = xNorm(q);
+  if (nm === qn) sc += 20; else if (nm.startsWith(qn)) sc += 8; else if (nm.replace(/ /g, "").startsWith(qn.replace(/ /g, ""))) sc += 6;
+  return sc;
+}
+function xAllIds() { return XLIB.map(x => x.id).concat(Object.keys(S.customEx || {}).filter(id => !XLIB_BY[id])); }
+/* filtered + grouped list for the picker: [{cat, label, ids}] */
+function xFilter(q, cat) {
+  const groups = [];
+  const qq = String(q || "").trim();
+  const ids = xAllIds();
+  if (!qq && (!cat || cat === "all")) {
+    const rec = (S.recentEx || []).filter(id => exById(id)).slice(0, 10);
+    if (rec.length) groups.push({ cat: "recent", label: "Recent", ids: rec });
+  }
+  for (const [c, label] of [["custom", XCAT_LABEL.custom]].concat(XCATS.filter(x => x[0] !== "custom"))) {
+    if (cat && cat !== "all" && cat !== c) continue;
+    const scored = ids.filter(id => xCat(id) === c).map(id => [id, xScore(id, qq)]).filter(x => x[1] > 0);
+    if (qq) scored.sort((a, b) => b[1] - a[1] || xName(a[0]).localeCompare(xName(b[0])));
+    if (scored.length) groups.push({ cat: c, label, ids: scored.map(x => x[0]) });
+  }
+  return groups;
+}
+function xExact(q) { const n = xNorm(q); return n ? xAllIds().find(id => xNorm(xName(id)) === n) : null; }
+function addedIds(d) { return (d && Array.isArray(d.added)) ? d.added : []; }
+function xInToday(day) { const s = new Set(); const d = S.drafts[day]; if (!d) return s; for (const b of planDay(day, d.date)) if (b.kind !== "warmup") for (const ex of b.items) s.add(ex.id); return s; }
+function openExPicker(day) {
+  const d = getDraft(day);
+  sheet(`<div class="xpk"><div class="row"><div class="grow"><h3>Add exercise</h3><div class="small muted">${esc(dayName(day))} · ${esc(fmtDate(d.date))}</div></div><button class="chip" data-act="sheet-close">Close</button></div>
+    <input id="xq" class="xq" type="search" placeholder="Search ${XLIB.length} exercises…" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" value="">
+    <div class="chips xcats">${[["all", "All"]].concat(XCATS.filter(c => c[0] !== "custom" || Object.keys(S.customEx || {}).length)).map(([k, l]) => `<button class="chip ${k === "all" ? "on" : ""}" data-act="xcat" data-v="${k}">${esc(l.split(" / ")[0])}</button>`).join("")}</div></div>
+    <div id="xlist"></div>`, { kind: "xpick", day, q: "", cat: "all" });
+  renderExList();
+  setTimeout(() => { const i = $("#xq"); if (i && SHEET && SHEET.kind === "xpick" && !matchMedia("(hover:none)").matches) i.focus(); }, 60);
+}
+function renderExList() {
+  const X = SHEET; if (!X || X.kind !== "xpick") return;
+  const el = $("#xlist"); if (!el) return;
+  const inDay = xInToday(X.day);
+  const groups = xFilter(X.q, X.cat);
+  const row = id => { const ex = exById(id); const L = XLIB_BY[id]; const has = inDay.has(id);
+    const tag = ex ? (ex.unit === "time" ? "cardio · min + " + (ex.repUnit || "") : ex.bw ? "bodyweight" : ex.unit === "lb/hand" ? "per hand" : ex.unit === "band" ? "band" : ex.repUnit === "m" ? "carry" : ex.gear ? ex.gear : "") : "";
+    return `<button class="qa xrow ${has ? "in" : ""}" data-act="xadd" data-id="${esc(id)}" style="width:100%;text-align:left"><div class="grow"><div style="font-weight:650">${esc(xName(id))}</div><div class="tiny muted">${esc([L ? "" : "custom", tag, has ? "in this workout" : ""].filter(Boolean).join(" · "))}</div></div><span class="plus">${has ? "✓" : "+"}</span></button>`; };
+  let h = "";
+  const q = String(X.q || "").trim();
+  if (q && !xExact(q)) h += `<button class="qa xrow xnew" data-act="xcustom" style="width:100%;text-align:left"><div class="grow"><div style="font-weight:700">Create custom: “${esc(q)}”</div><div class="tiny muted">${groups.length ? "Not the one? Make your own" : "No match in the library"} · saved for next time</div></div><span class="plus">+</span></button>`;
+  for (const g of groups) h += `<div class="sec xsec"><span class="k">${esc(g.label)}</span><span class="v">${g.ids.length}</span></div><div class="card xcard">${g.ids.map(row).join("")}</div>`;
+  if (!groups.length && !q) h += `<div class="empty">Nothing here yet.</div>`;
+  el.innerHTML = h;
+}
+const XNEW_TYPES = [["db1", "Weight (lb/kg)"], ["db", "Per hand (2 DB/KB)"], ["bw", "Bodyweight (+ optional load)"], ["hold", "Hold (seconds)"], ["carry", "Carry (metres)"], ["cm", "Cardio: min + metres"], ["cc", "Cardio: min + calories"], ["cmin", "Cardio: minutes"]];
+function xGuessType(name) {
+  const n = name.toLowerCase();
+  if (/\b(row(ing)? erg|rower|run|bike|ski|swim|jog|sprint|treadmill)\b/.test(n)) return "cm";
+  if (/\b(walk|elliptical|stair|cardio|zone|emom|amrap|golf|hike|yoga|mobility|stretch)\b/.test(n)) return "cmin";
+  if (/\b(plank|hold|hang|sit)\b/.test(n) && !/sit-?up/.test(n)) return "hold";
+  if (/\b(carry|walk)\b/.test(n)) return "carry";
+  if (/\b(push-?ups?|pull-?ups?|chin-?ups?|dips?|burpees?|air squat|lunge|jumps?|sit-?ups?|crunch|bodyweight|bw)\b/.test(n)) return "bw";
+  if (/\b(db|dumbbells?|kb|kettlebells?)\b/.test(n) && !/single|one-arm|goblet/.test(n)) return "db";
+  return "db1";
+}
+function openXCustom(name) {
+  const day = SHEET.day; const nm = String(name || "").trim().replace(/\s+/g, " ").slice(0, 60);
+  if (!nm) return;
+  sheet(`<h3>New exercise</h3><div class="small muted">Saved to My exercises so you can find it next time</div>
+    <label class="fld"><span>Name</span><input id="xc-name" value="${esc(nm)}" maxlength="60" autocomplete="off"></label>
+    <div class="fld"><span>How do you log it?</span></div><div class="links" style="margin-top:6px">${XNEW_TYPES.map(([k, l]) => `<button class="chip ${k === xGuessType(nm) ? "on" : ""}" data-act="xc-type" data-v="${k}">${esc(l)}</button>`).join("")}</div>
+    <div class="btns"><button class="btn" data-act="xc-back" style="flex:.6">Back</button><button class="btn acc" data-act="xc-save">Add to workout</button></div>`, { kind: "xnew", day, type: xGuessType(nm), q: nm });
+}
+function xCreateCustom(name, type) {
+  const nm = String(name || "").trim().replace(/\s+/g, " ").slice(0, 60); if (!nm) return null;
+  const ex = xExact(nm); if (ex) return ex;
+  S.customEx = S.customEx || {};
+  let id = "cx_" + (xslug(nm) || "lift"), n = 2; while (S.customEx[id] || XLIB_BY[id] || slotById(id) || (PROGRAM.alts || {})[id]) id = "cx_" + xslug(nm) + "_" + n++;
+  S.customEx[id] = { name: nm, type: XT[type] ? type : "db1", created: new Date().toISOString() };
+  delete _exCache[id];
+  return id;
+}
+/* append a lift to today's workout for that day; returns false if it is already there */
+function addExercise(day, id) {
+  const d = getDraft(day);
+  if (!exById(id)) { toast("Unknown exercise"); return false; }
+  if (xInToday(day).has(id)) { toast(xName(id) + " is already in this workout"); return false; }
+  d.added = addedIds(d).concat([id]);
+  S.recentEx = [id].concat((S.recentEx || []).filter(x => x !== id)).slice(0, 15);
+  syncDraft(day);
+  S.ui.open[id] = true;
+  save();
+  return true;
+}
+function removeExercise(day, id) {
+  const d = S.drafts[day]; if (!d) return;
+  d.added = addedIds(d).filter(x => x !== id);
+  delete d.ex[id]; delete S.ui.open[id];
+  save();
+}
+
 /* ============================ PROGRESS (hand-rolled SVG charts) ============================ */
 function lineChart({ series, xmin, xmax, ymin, ymax, w = 340, h = 190, yfmt = v => Math.round(v), xlabels = [], hlines = [] }) {
   const L = 34, R = 8, T = 12, B = 22, W = w - L - R, H = h - T - B;
@@ -1688,7 +2035,7 @@ function viewHistory() {
   if (!list.length) h += `<div class="card empty">${ICON.tabHist}No app sessions yet. Finish a workout and it lands here.<br><br>Day ${nextDay()} is up next.</div>`;
   for (const s of list) {
     const st = sessionStats(s);
-    h += `<button class="hs" style="width:100%;text-align:left;display:block" data-act="hist" data-id="${s.id}"><div class="hh"><div class="code" style="background:var(--acc);color:var(--acc-ink)">${s.day}</div><div class="grow"><div style="font-weight:700;font-size:16px">${fmtDate(s.date)}</div><div class="small muted">Day ${s.day} · Week ${s.week}${s.mode === "amber" ? " · amber plan" : ""}${s.gym === "crossfit" ? " · CrossFit gym" : ""}</div></div>${s.prs ? `<span class="pill" style="background:#ffd60a;color:#000">🏆 ${s.prs} PR</span>` : ""}<span class="muted">${ICON.right.replace("<svg", '<svg width="18" height="18"')}</span></div>
+    h += `<button class="hs" style="width:100%;text-align:left;display:block" data-act="hist" data-id="${s.id}"><div class="hh"><div class="code" style="background:var(--acc);color:var(--acc-ink)">${s.day === "X" ? "+" : s.day}</div><div class="grow"><div style="font-weight:700;font-size:16px">${fmtDate(s.date)}</div><div class="small muted">${dayName(s.day)} · Week ${s.week}${s.mode === "amber" ? " · amber plan" : ""}${s.gym === "crossfit" ? " · CrossFit gym" : ""}</div></div>${s.prs ? `<span class="pill" style="background:#ffd60a;color:#000">🏆 ${s.prs} PR</span>` : ""}<span class="muted">${ICON.right.replace("<svg", '<svg width="18" height="18"')}</span></div>
       <div class="kv"><span><b class="num">${s.durationMin != null ? s.durationMin : "–"}</b> min</span><span><b class="num">${st.sets}</b> sets</span><span><b class="num">${st.volume.toLocaleString()}</b> lb volume</span></div>
       <div class="hl">${s.exercises.filter(e => doneSets(e).length).map(e => `<div>${esc(e.name)} <span class="muted">${esc(setsLine(doneSets(e), exById(e.id)))}</span></div>`).join("")}</div>${s.notes ? `<div class="small muted" style="margin-top:6px">“${esc(s.notes)}”</div>` : ""}</button>`;
   }
@@ -1712,8 +2059,8 @@ function openHistBtwb(id) {
 }
 function openHist(id) {
   const s = S.sessions.find(x => x.id === id); if (!s) return;
-  sheet(`<div class="row"><div class="grow"><h3>Day ${s.day} · ${fmtDate(s.date)}</h3><div class="small muted">Tap a value to edit · × deletes a set</div></div><button class="chip" data-act="hist-dur">${s.durationMin != null ? s.durationMin + " min" : "Set time"}</button></div>
-    ${s.exercises.map((e, ei) => { const ex = exById(e.id) || {}; return `<div style="margin-top:14px"><div style="font-weight:700">${esc(e.name)}</div><div class="sets" style="margin:4px 0 0">${e.sets.map((st, si) => `<div class="sr"><span class="n">${si + 1}</span><button class="cell num" data-act="hist-set" data-e="${ei}" data-i="${si}" data-f="w">${st.kg != null ? fmtN(st.kg) + '<span class="tiny muted">kg</span>' : fmtN(st.w) || "—"}</button><button class="cell num" data-act="hist-set" data-e="${ei}" data-i="${si}" data-f="r">${fmtN(st.r)}${ex.repUnit || ""}</button><button class="cell rpe num" data-act="hist-set" data-e="${ei}" data-i="${si}" data-f="r">${st.rpe ? "@" + fmtN(st.rpe) : "–"}</button><button class="ck" style="border-color:transparent;color:var(--red);font-size:24px" data-act="hist-del-set" data-e="${ei}" data-i="${si}" aria-label="Delete set">×</button></div>`).join("")}</div></div>`; }).join("")}
+  sheet(`<div class="row"><div class="grow"><h3>${dayName(s.day)} · ${fmtDate(s.date)}</h3><div class="small muted">Tap a value to edit · × deletes a set</div></div><button class="chip" data-act="hist-dur">${s.durationMin != null ? s.durationMin + " min" : "Set time"}</button></div>
+    ${s.exercises.map((e, ei) => { const ex = exById(e.id) || {}; return `<div style="margin-top:14px"><div style="font-weight:700">${esc(e.name)}</div><div class="sets" style="margin:4px 0 0">${e.sets.map((st, si) => `<div class="sr"><span class="n">${si + 1}</span><button class="cell num" data-act="hist-set" data-e="${ei}" data-i="${si}" data-f="w">${st.kg != null ? fmtN(st.kg) + '<span class="tiny muted">kg</span>' : ex.unit === "time" && st.w ? fmtN(st.w) + '<span class="tiny muted">min</span>' : fmtN(st.w) || (ex.bw ? "BW" : "—")}</button><button class="cell num" data-act="hist-set" data-e="${ei}" data-i="${si}" data-f="r">${fmtN(st.r)}${ex.repUnit || ""}</button><button class="cell rpe num" data-act="hist-set" data-e="${ei}" data-i="${si}" data-f="r">${st.rpe ? "@" + fmtN(st.rpe) : "–"}</button><button class="ck" style="border-color:transparent;color:var(--red);font-size:24px" data-act="hist-del-set" data-e="${ei}" data-i="${si}" aria-label="Delete set">×</button></div>`).join("")}</div></div>`; }).join("")}
     <label class="fld"><span>Notes</span><textarea id="hist-notes" rows="2">${esc(s.notes || "")}</textarea></label>
     <div class="btns"><button class="btn danger" data-act="hist-del">Delete</button><button class="btn" data-act="hist-share">${ICON.send} Send</button><button class="btn acc" data-act="hist-save">Done</button></div>`, { kind: "hist", id });
 }
@@ -1786,6 +2133,15 @@ function act(a, t) {
     case "add-set": { const e = S.drafts[day].ex[id]; const l = e.sets[e.sets.length - 1]; e.sets.push({ w: l ? l.w : e.target.w, r: null, rpe: null, done: false }); e.custom = true; e.touched = true; e.target.reps.push(e.target.reps[e.target.reps.length - 1]); S.ui.open[id] = true; save(); render(); break; }
     case "rm-set": { const e = S.drafts[day].ex[id]; if (e.sets.length > 1) { e.sets.pop(); e.custom = true; e.touched = true; save(); render(); } break; }
     case "toggle-ex": S.ui.open[id] = !S.ui.open[id]; save(); render(); break;
+    // v1.6 add exercise on the fly
+    case "add-ex": openExPicker(day); break;
+    case "xcat": SHEET.cat = v; document.querySelectorAll('[data-act="xcat"]').forEach(b => b.classList.toggle("on", b.dataset.v === v)); renderExList(); { const l = $("#xlist"); if (l) $("#sheet").scrollTop = 0; } break;
+    case "xadd": { const dd = SHEET.day; if (addExercise(dd, id)) { closeSheet(); S.ui.day = dd; render(); haptic(); toast("Added " + xName(id)); setTimeout(() => { const el = document.getElementById("ex-" + id); if (el) el.scrollIntoView({ behavior: "smooth", block: "center" }); }, 60); } break; }
+    case "xcustom": openXCustom(SHEET.q); break;
+    case "xc-type": SHEET.type = v; document.querySelectorAll('[data-act="xc-type"]').forEach(b => b.classList.toggle("on", b.dataset.v === v)); break;
+    case "xc-back": { const dd = SHEET.day, q = SHEET.q; openExPicker(dd); SHEET.q = q; const inp = $("#xq"); if (inp) inp.value = q; renderExList(); break; }
+    case "xc-save": { const dd = SHEET.day; const nm = (($("#xc-name") || {}).value || SHEET.q || "").trim(); if (!nm) { toast("Type a name"); break; } const nid = xCreateCustom(nm, SHEET.type); if (nid && addExercise(dd, nid)) { closeSheet(); S.ui.day = dd; render(); toast("Added " + xName(nid)); setTimeout(() => { const el = document.getElementById("ex-" + nid); if (el) el.scrollIntoView({ behavior: "smooth", block: "center" }); }, 60); } break; }
+    case "rm-ex": { const e = S.drafts[day] && S.drafts[day].ex[id]; if (e && e.sets.some(s => s.done) && !confirm("Remove " + (e.name || "this exercise") + " and its logged sets?")) break; removeExercise(day, id); render(); toast("Removed"); break; }
     case "rest-add": if (S.rest) { S.rest.endAt = Math.max(S.rest.endAt, Date.now()) + 15000; S.rest.total += 15; S.rest.fired = false; save(); renderRest(); } break;
     case "rest-skip": S.rest = null; save(); renderRest(); break;
     case "pad-key": padKey(v === "del" || v === "." ? v : +v); break;
@@ -1882,11 +2238,13 @@ document.addEventListener("input", ev => {
   const el = ev.target;
   if (el.dataset && el.dataset.mach) { const m = S.machine[el.dataset.mach] = S.machine[el.dataset.mach] || {}; m[el.dataset.f] = el.value; save(); }
   if (el.id === "fin-notes" && S.drafts[S.ui.day]) { S.drafts[S.ui.day].notes = el.value; save(); }
+  if (el.id === "xq" && SHEET && SHEET.kind === "xpick") { SHEET.q = el.value; renderExList(); }
   if (el.dataset && el.dataset.scanm && SHEET && SHEET.kind === "scanc") { SHEET.m[el.dataset.scanm] = el.value.trim() === "" ? null : parseFloat(el.value); scanTotalsOnly(); }
   if (el.id === "scan-grams" && SHEET && SHEET.kind === "scanc") { SHEET.grams = parseFloat(el.value) || 0; scanTotalsOnly(); }
 });
 $("#scrim").addEventListener("click", closeSheet);
 document.addEventListener("keydown", ev => {
+  if (ev.key === "Enter" && ev.target && ev.target.id === "xq") { ev.preventDefault(); ev.target.blur(); return; }
   if (ev.key === "Enter" && ev.target && ev.target.id === "scan-code") { ev.preventDefault(); stopScan(); lookupCode(ev.target.value); return; }
   if (!PAD) return;
   if (/^[0-9]$/.test(ev.key)) padKey(+ev.key); else if (ev.key === ".") padKey("."); else if (ev.key === "Backspace") padKey("del"); else if (ev.key === "Enter") padOk(); else if (ev.key === "Escape") closeSheet(); else return;
@@ -1928,9 +2286,10 @@ function weightLine(date) { const bw = sortedBw(); const l = bw.find(b => b.date
 function iso(t) { return t ? new Date(t).toISOString() : null; }
 function exDoc(e) {
   const ex = exById(e.id) || {};
+  const tm = ex.unit === "time";
   return Object.assign({ id: e.id, name: e.name, slot: e.slot || (ex.slot && ex.slot !== e.id ? ex.slot : undefined), unit: ex.unit || "lb", repUnit: ex.repUnit || undefined,
-    sets: (e.sets || []).map(st => Object.assign({ w_lb: st.w == null || st.w === "" ? null : +st.w, reps: st.r == null ? null : +st.r, rpe: st.rpe == null ? null : +st.rpe, entered: st.kg != null && st.kg !== "" ? "kg" : "lb" }, st.kg != null && st.kg !== "" ? { kg: +st.kg } : {}, st.done === false ? { done: false } : {})),
-    warm: (e.warm || []).filter(w => w.done !== false).map(w => ({ w_lb: w.w, reps: w.r })) }, e.orig ? { correctedFrom: e.orig.id } : {});
+    sets: (e.sets || []).map(st => Object.assign({ w_lb: tm || st.w == null || st.w === "" ? null : +st.w, reps: st.r == null ? null : +st.r, rpe: st.rpe == null ? null : +st.rpe, entered: st.kg != null && st.kg !== "" ? "kg" : "lb" }, st.kg != null && st.kg !== "" ? { kg: +st.kg } : {}, st.done === false ? { done: false } : {}, tm && st.w != null && st.w !== "" ? { min: +st.w } : {})),
+    warm: (e.warm || []).filter(w => w.done !== false).map(w => ({ w_lb: w.w, reps: w.r })) }, e.orig ? { correctedFrom: e.orig.id } : {}, e.added ? { added: true } : {}, ex.custom ? { custom: true } : {});
 }
 function sessDoc(s, live) {
   return { id: s.id, day: s.day, week: s.week, gym: s.gym || "std", mode: s.mode || "normal", amber: s.mode === "amber", rating: s.rating || "unknown", inProgress: !!live,
