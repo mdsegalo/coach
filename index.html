@@ -1881,8 +1881,10 @@ function renderExList() {
     return `<button class="qa xrow ${has ? "in" : ""}" data-act="xadd" data-id="${esc(id)}" style="width:100%;text-align:left"><div class="grow"><div style="font-weight:650">${esc(xName(id))}</div><div class="tiny muted">${esc([L ? "" : "custom", tag, has ? "in this workout" : ""].filter(Boolean).join(" · "))}</div></div><span class="plus">${has ? "✓" : "+"}</span></button>`; };
   let h = "";
   const q = String(X.q || "").trim();
-  if (q && !xExact(q)) h += `<button class="qa xrow xnew" data-act="xcustom" style="width:100%;text-align:left"><div class="grow"><div style="font-weight:700">Create custom: “${esc(q)}”</div><div class="tiny muted">${groups.length ? "Not the one? Make your own" : "No match in the library"} · saved for next time</div></div><span class="plus">+</span></button>`;
+  const mk = q && !xExact(q) ? `<button class="qa xrow xnew" data-act="xcustom" style="width:100%;text-align:left${groups.length ? ";margin-top:14px" : ""}"><div class="grow"><div style="font-weight:700">Create custom: “${esc(q)}”</div><div class="tiny muted">${groups.length ? "Not in the list? Make your own" : "No match in the library"} · saved for next time</div></div><span class="plus">+</span></button>` : "";
+  if (!groups.length) h += mk;   // nothing matches: offer it first
   for (const g of groups) h += `<div class="sec xsec"><span class="k">${esc(g.label)}</span><span class="v">${g.ids.length}</span></div><div class="card xcard">${g.ids.map(row).join("")}</div>`;
+  if (groups.length) h += mk;    // otherwise at the end of the list
   if (!groups.length && !q) h += `<div class="empty">Nothing here yet.</div>`;
   el.innerHTML = h;
 }
