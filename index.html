@@ -351,7 +351,7 @@ const COACH_DATA_FALLBACK = {
 /* ============================ storage ============================ */
 const LS_KEY = "mikecoach";
 const SCHEMA = 2;
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.6.1";
 
 function seedState() {
   return {
@@ -568,7 +568,7 @@ const VKEYS = ["name", "unit", "inc", "incKg", "kgDefault", "bar", "warmup", "ma
 function mergeVariant(slot, vid) {
   const base = Object.assign({}, slot, { slot: slot.id, gear: (PROGRAM.gear || {})[slot.id], kgDefault: slot.kgDefault != null ? slot.kgDefault : (PROGRAM.kgDefault || {})[slot.id], incKg: slot.incKg || (PROGRAM.incKg || {})[slot.id] });
   if (!vid || vid === slot.id) return base;
-  const alt = (PROGRAM.alts || {})[vid];
+  const alt = (PROGRAM.alts || {})[vid] || coachEx(vid);
   const v = alt ? Object.assign({ id: vid }, alt) : slotById(vid);
   if (!v) return base;
   const out = Object.assign({}, base);
@@ -593,7 +593,7 @@ function exById(id) {
   if (_exCache[id] !== undefined) return _exCache[id];
   let r = slotById(id);
   if (r) r = mergeVariant(r, id);
-  else if ((PROGRAM.alts || {})[id]) { const h = homeSlot(id); r = h ? mergeVariant(h, id) : Object.assign({ id, sets: 3, reps: 10, range: [8, 12], rpe: "7", muscles: [] }, PROGRAM.alts[id]); }
+  else if ((PROGRAM.alts || {})[id] || coachEx(id)) { const h = homeSlot(id); const alt = (PROGRAM.alts || {})[id] || Object.assign({ id }, coachEx(id)); r = h ? mergeVariant(h, id) : Object.assign({ id, sets: 3, reps: 10, range: [8, 12], rpe: "7", muscles: [] }, alt); }
   if (!r) r = xLookup(id);   // v1.6: Add-exercise library + custom exercises
   if (r) _exCache[id] = r;     // misses aren't cached (a custom exercise may be created later)
   return r || null;
@@ -601,9 +601,106 @@ function exById(id) {
 /* Program lifts + every alt (for Progress charts / PR board) */
 function knownExercises() { const ids = allExercises().map(e => e.id).concat(Object.keys(PROGRAM.alts || {})); for (const s of S.sessions) for (const e of s.exercises || []) ids.push(e.id); return [...new Set(ids)].map(exById).filter(Boolean); }
 function gymMode() { return S.settings.gym === "crossfit" ? "crossfit" : "std"; }
-/* Which lift fills this slot today: explicit swap > CrossFit pick > plan */
-function choiceFor(slot, d) {
+/* v1.6.1 coach.json plan overrides
+   planDays: an array of { day, date? | from?/until?, name?, focus?, desc?, shortOnTime?, note?, totalMin?,
+     blocks?, warmup?, addBlocks?, slotNotes?, defaultSwaps? }
+   or an object keyed by day. An exact `date` or a from/until window (inclusive) selects the entry;
+   last match wins, and an exact `date` beats a window. `blocks` replaces the day's blocks; otherwise
+   warmup / addBlocks / slotNotes patch the program day. defaultSwaps pick a variant unless the
+   athlete already chose one. exercises: { id: { name, unit, ... } } acts like PROGRAM.alts. */
+function coachEx(id) { return (COACH && COACH.exercises && COACH.exercises[id]) || null; }
+function planDayList() {
+  const raw = COACH && COACH.planDays;
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter(Boolean);
+  if (typeof raw === "object") return Object.keys(raw).map(k => Object.assign({ day: k }, raw[k]));
+  return [];
+}
+function planApplies(p, day, date) {
+  if (!p || p.day !== day) return false;
+  if (p.date) return p.date === date;
+  if (p.from && date < p.from) return false;
+  if (p.until && date > p.until) return false;
+  return true;
+}
+function overrideFor(day, date) {
+  const ds = date || today();
+  const hits = planDayList().filter(p => planApplies(p, day, ds));
+  if (!hits.length) return null;
+  hits.sort((a, b) => (a.date ? 1 : 0) - (b.date ? 1 : 0));
+  return hits[hits.length - 1];
+}
+function applyDayPatch(base, patch) {
+  const day = Object.assign({}, base, {
+    name: patch.name || base.name,
+    focus: patch.focus || base.focus,
+    desc: patch.desc || base.desc,
+    shortOnTime: patch.shortOnTime != null ? patch.shortOnTime : base.shortOnTime,
+    note: patch.note || base.note,
+    defaultSwaps: patch.defaultSwaps,
+    blocks: (base.blocks || []).map(b => Object.assign({}, b, { items: b.items && b.items.slice() }))
+  });
+  if (patch.warmup) {
+    const src = patch.warmup;
+    const items = Array.isArray(src) ? src : (src.items || []);
+    const block = { id: ((day.blocks.find(b => b.kind === "warmup") || {}).id) || "WU", label: src.label || "Warm-up", kind: "warmup", minutes: src.minutes != null ? src.minutes : 5, items };
+    if (day.blocks.some(b => b.kind === "warmup")) day.blocks = day.blocks.map(b => b.kind === "warmup" ? block : b);
+    else day.blocks = [block].concat(day.blocks);
+  }
+  if (patch.slotNotes || patch.slotUpdates) {
+    day.blocks = day.blocks.map(b => {
+      if (b.kind === "warmup" || !Array.isArray(b.items)) return b;
+      return Object.assign({}, b, { items: b.items.map(it => {
+        if (!it || typeof it !== "object") return it;
+        let out = it;
+        if (patch.slotUpdates && patch.slotUpdates[it.id]) out = Object.assign({}, out, patch.slotUpdates[it.id]);
+        if (patch.slotNotes && patch.slotNotes[it.id]) out = Object.assign({}, out, { note: patch.slotNotes[it.id] });
+        return out;
+      }) });
+    });
+  }
+  if (patch.addBlocks) {
+    for (const add of patch.addBlocks) {
+      const block = Object.assign({}, add.block || add);
+      delete block.after; delete block.before; delete block.at;
+      let idx = day.blocks.length;
+      if (add.after) { const i = day.blocks.findIndex(b => b.id === add.after); if (i >= 0) idx = i + 1; }
+      else if (add.before) { const i = day.blocks.findIndex(b => b.id === add.before); if (i >= 0) idx = i; }
+      else if (add.at === "start") idx = day.blocks[0] && day.blocks[0].kind === "warmup" ? 1 : 0;
+      day.blocks = day.blocks.slice(0, idx).concat([block], day.blocks.slice(idx));
+    }
+  }
+  if (patch.totalMin != null) day.totalMin = patch.totalMin;
+  else {
+    const baseWu = (base.blocks || []).find(b => b.kind === "warmup");
+    const newWu = day.blocks.find(b => b.kind === "warmup");
+    const wuDelta = (baseWu && newWu) ? (newWu.minutes || 0) - (baseWu.minutes || 0) : 0;
+    const addMin = (patch.addBlocks || []).reduce((s, a) => s + ((a.block || a).minutes || 0), 0);
+    if (base.totalMin != null && (wuDelta || addMin)) day.totalMin = base.totalMin + wuDelta + addMin;
+  }
+  return day;
+}
+function dayDef(day, date) {
+  const base = PROGRAM.days[day] || { name: "Day " + day, focus: "", totalMin: 0, desc: "", blocks: [] };
+  const o = overrideFor(day, date || today());
+  if (!o) return base;
+  if (o.blocks) return Object.assign({}, base, {
+    name: o.name || base.name,
+    focus: o.focus || base.focus,
+    totalMin: o.totalMin != null ? o.totalMin : base.totalMin,
+    desc: o.desc || base.desc,
+    shortOnTime: o.shortOnTime != null ? o.shortOnTime : base.shortOnTime,
+    note: o.note,
+    defaultSwaps: o.defaultSwaps,
+    blocks: o.blocks
+  });
+  return applyDayPatch(base, o);
+}
+/* Which lift fills this slot today: explicit swap > coach defaultSwap > CrossFit pick > plan */
+function choiceFor(slot, d, day, date) {
   if (d && d.swap && d.swap[slot.id]) return d.swap[slot.id];
+  const ov = overrideFor(day || (d && d.day), date || (d && d.date) || today());
+  if (ov && ov.defaultSwaps && ov.defaultSwaps[slot.id]) return ov.defaultSwaps[slot.id];
   if (gymMode() === "crossfit" && (PROGRAM.crossfit || {})[slot.id]) return PROGRAM.crossfit[slot.id];
   return slot.id;
 }
@@ -621,16 +718,16 @@ function dayMode(day) {
   return "normal";
 }
 function planDay(day, date) {
-  const D = PROGRAM.days[day];
+  const D = dayDef(day, date || today());
   const wk = weekInfo(date || today());
   const amber = dayMode(day) === "amber";
   const dr = S.drafts[day]; const used = new Set();
   const addIds = addedIds(dr), reserved = new Set(addIds);
-  const blocks = D.blocks.map(b => {
+  const blocks = (D.blocks || []).map(b => {
     if (b.kind === "warmup") return Object.assign({}, b);
     let before = 0, after = 0;
     const items = b.items.map(slot => {
-      let ex = mergeVariant(slot, choiceFor(slot, dr));
+      let ex = mergeVariant(slot, choiceFor(slot, dr, day, date || today()));
       if (used.has(ex.id) || (reserved.has(ex.id) && ex.id !== slot.id)) ex = mergeVariant(slot, slot.id);   // never the same lift twice in one day (added lifts keep their id)
       used.add(ex.id);
       let sets = ex.sets, rpe = ex.rpe;
@@ -1061,8 +1158,8 @@ function gymCard(day) {
 function viewWorkout() {
   const nd = nextDay();
   if (!S.ui.day) S.ui.day = Object.keys(S.drafts).find(k => S.drafts[k] && S.drafts[k].startedAt) || nd;
-  const day = S.ui.day; const D = PROGRAM.days[day];
-  const d = getDraft(day); save();
+  const day = S.ui.day; const d = getDraft(day); save();
+  const D = dayDef(day, d.date);
   const wk = weekInfo(d.date); const blocks = planDay(day, d.date); const mode = dayMode(day);
   const cnt = draftCounts(day);
   const ring = `<div class="ring" title="Sets done">${ringSvg(cnt.total ? cnt.done / cnt.total : 0, 50, 5, "var(--acc)")}<div class="c"><b class="num" style="font-size:15px">${cnt.done}</b><span class="muted num" style="font-size:9.5px">/${cnt.total}</span></div></div>`;
@@ -1070,7 +1167,7 @@ function viewWorkout() {
   h += recoveryBanner(day);
   h += gymCard(day);
   if (COACH && COACH.message) h += `<div class="card coachmsg"><div class="avatar">C</div><div><div class="tiny muted" style="font-weight:800;letter-spacing:.07em">FROM COACH</div><div style="margin-top:2px;font-size:14.5px">${esc(COACH.message)}</div></div></div>`;
-  h += `<div class="seg">${PROGRAM.rotation.map(k => `<button class="${k === day ? "on" : ""}" data-act="day" data-v="${k}"><span class="d">Day ${k}</span><span class="s">${esc(PROGRAM.days[k].focus.split(" / ")[0])}</span>${S.drafts[k] && S.drafts[k].startedAt ? '<span class="next" style="background:var(--amber)">LIVE</span>' : k === nd ? '<span class="next">NEXT</span>' : ""}</button>`).join("")}<button class="${day === "X" ? "on" : ""}" data-act="day" data-v="X"><span class="d">+</span><span class="s">Extra</span>${S.drafts.X && S.drafts.X.startedAt ? '<span class="next" style="background:var(--amber)">LIVE</span>' : ""}</button></div>`;
+  h += `<div class="seg">${PROGRAM.rotation.map(k => `<button class="${k === day ? "on" : ""}" data-act="day" data-v="${k}"><span class="d">Day ${k}</span><span class="s">${esc((dayDef(k, d.date).focus || PROGRAM.days[k].focus).split(" / ")[0])}</span>${S.drafts[k] && S.drafts[k].startedAt ? '<span class="next" style="background:var(--amber)">LIVE</span>' : k === nd ? '<span class="next">NEXT</span>' : ""}</button>`).join("")}<button class="${day === "X" ? "on" : ""}" data-act="day" data-v="X"><span class="d">+</span><span class="s">Extra</span>${S.drafts.X && S.drafts.X.startedAt ? '<span class="next" style="background:var(--amber)">LIVE</span>' : ""}</button></div>`;
   if (day === "X") {
     const n = addedIds(d).length;
     h += `<div class="card"><div class="row"><h2 class="grow">${esc(D.name)}</h2><span class="pill acc">${n} exercise${n === 1 ? "" : "s"}</span></div>
@@ -1081,6 +1178,7 @@ function viewWorkout() {
     <div class="small muted" style="margin-top:2px;font-weight:600">${esc(D.focus)} · ${esc(mode === "amber" ? "amber: RPE ≤7, last set dropped" : wk.label)}${gymMode() === "crossfit" ? ' · <span style="color:var(--blue)">CrossFit gym</span>' : ""}</div>
     <div style="margin-top:8px;font-size:14px;color:#d2d2d7">${esc(D.desc)}</div>
     <div class="small" style="margin-top:8px;color:var(--acc);font-weight:600">Week ${wk.n}: ${esc(wk.focus)}</div>
+    ${D.note ? `<div class="callout"><span>⚠</span><span>${esc(D.note)}</span></div>` : ""}
     <div class="callout"><span>⏱</span><span><b>Short on time?</b> ${esc(D.shortOnTime)}</span></div></div>`;
   }
   if (!d.startedAt && day !== "X") h += `<button class="btn acc" style="margin-top:14px;min-height:56px;font-size:17px" data-act="start">${ICON.play} Start workout · ${PROGRAM.sessionCapMin} min cap</button>`;
@@ -1128,7 +1226,8 @@ function exCard(day, d, b, ex, wk, nx) {
     <div class="eh" ${doneAll ? `data-act="toggle-ex" data-id="${ex.id}"` : ""}><div class="code">${esc(ex.code)}</div><div class="grow"><div class="nmw ${swapSel ? "has" : ""} ${locked ? "lk" : ""}"><div class="nm">${esc(ex.name)}${swapSel ? `<span class="swp" aria-hidden="true">⇅</span>` : ""}</div>${swapSel}</div>
       ${ex.swapped ? `<div class="subfor">${auto ? '<span class="pill blue">CrossFit</span> ' : '<span class="pill blue">Swap</span> '}for ${esc(ex.slotName)}</div>` : ""}
       ${ex.added ? `<div class="subfor"><span class="pill">Added</span> ${esc(XCAT_LABEL[xCat(ex.id)] || "")}</div>` : ""}
-      <div class="meta"><b>${ex.sets} × ${esc(repsDisp)}</b><span>${/^\d/.test(ex.rpe) ? "RPE " : ""}${esc(ex.rpe)}</span><span>${esc(restTxt)}</span></div></div>
+      <div class="meta"><b>${ex.sets} × ${esc(repsDisp)}</b><span>${/^\d/.test(ex.rpe) ? "RPE " : ""}${esc(ex.rpe)}</span><span>${esc(restTxt)}</span></div>
+      ${ex.note ? `<div class="subfor" style="color:var(--amber)">${esc(ex.note)}</div>` : ""}</div>
       ${doneAll ? `<span class="chev" style="transform:rotate(${open ? 180 : 0}deg)">${ICON.chev}</span>` : ""}</div>
     <div class="sum"><span style="color:var(--acc)">✓</span> ${esc(setsLine(doneSets(e), ex))} ${isTime || (ex.bw && doneSets(e).every(s => s.w == null || s.w === "")) ? "" : doneSets(e).every(s => s.kg != null) ? esc(ex.unit === "lb/hand" ? "per hand" : "") : ul}</div>
     <div class="body">`;
@@ -1696,7 +1795,7 @@ const XLIB_SRC = {
     "DB floor press|db||c t", "Push-up|bw|pushup|c t|pushups press up", "Incline push-up|bw||c t|pushup", "Deficit push-up|bw||c t|pushup",
     "Weighted push-up|bwl||c t|pushup vest", "Ring push-up|bw||c t|pushup", "DB fly|db|db_fly|c", "Incline DB fly|db||c", "Ring fly|bw|ring_fly|c",
     "Cable fly (mid height)|cable|cable_fly|c|crossover", "Low-to-high cable fly|cable||c|crossover", "High-to-low cable fly|cable||c|crossover",
-    "Pec deck|mach||c|fly machine", "Machine chest press|mach||c t", "Smith machine bench press|mach||c t", "Landmine press|db1||c s",
+    "Pec deck|mach||c|fly machine", "Machine chest press|mach|machine_chest_press|c t", "Smith machine bench press|mach||c t", "Landmine press|db1||c s",
     "Svend press (plate)|db1||c", "Band chest press|band||c t", "DB pullover|db1||c b"
   ],
   back: [
@@ -1747,7 +1846,7 @@ const XLIB_SRC = {
   ],
   core: [
     "Pallof press|cable|pallof|co|anti rotation", "Band Pallof press|band|band_pallof|co|anti rotation", "Dead bug|bw|dead_bug|co", "Plank|hold||co",
-    "Side plank|hold||co", "Hollow hold|hold||co|hollow body", "Hollow rock|bw||co", "Bird dog|bw||co", "Bear crawl|carry1||co s", "Ab wheel rollout|bw||co|ab roller",
+    "Side plank|hold|side_plank|co", "Hollow hold|hold||co|hollow body", "Hollow rock|bw||co", "Bird dog|bw||co", "Bear crawl|carry1||co s", "Ab wheel rollout|bw||co|ab roller",
     "Hanging knee raise|bw||co", "Hanging leg raise|bw||co", "Toes-to-bar|bw||co|t2b ttb", "Cable crunch|cable||co|abs", "Crunch|bw||co|abs sit up",
     "Sit-up|bw||co|situp abmat", "GHD sit-up|bw||co", "V-up|bw||co", "Russian twist|bw||co", "Mountain climber|bw||co", "Woodchop (cable)|cable||co",
     "Landmine rotation|db1||co", "Copenhagen plank|hold||co|adductor", "L-sit|hold||co", "Farmer carry|carry|farmer_carry|co|farmers walk",

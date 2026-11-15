@@ -171,3 +171,11 @@ This uses `navigator.share` (the iOS share sheet) and falls back to the clipboar
 - Bodyweight moves (`bw`) leave weight blank ("BW") or take added load. Cardio (`unit: "time"`): the weight column is **minutes** and reps is metres, calories or rounds (export `Row (erg) 8.5 min / 2000 m`, day file `min: 8.5`, `w_lb: null`).
 - Sessions store added exercises with `added: true` (and `custom: true` in day files for custom ones). Send to Coach marks them `(added)`. They sync in `days/*.json` and `state.json` like everything else, and show in History, Progress charts (when e1RM applies) and the PR board.
 - **Extra** (day key `X`) is an off-rotation workout made only of added lifts, for rest days or extra conditioning. It saves and syncs like any session but never changes which A/B/C day is next.
+
+## v1.6.1: coach-pushed day plans
+
+- `coach.json` may include `planDays`, so a private coach feed can replace or patch a day's work without shipping personal programming in the public app.
+- Each entry is `{ day, date?` or `from?`/`until?`, `name?, focus?, desc?, shortOnTime?, note?, totalMin?, blocks?, warmup?, addBlocks?, slotNotes?, defaultSwaps? }`. An array, or an object keyed by day, both work. An exact `date` or a from/until window (inclusive) selects the entry; the last match wins, and an exact date beats a window.
+- `blocks` replaces the day's blocks. Otherwise `warmup` replaces the warm-up, `addBlocks` inserts a block (`before` / `after` a block id, or at the end), `slotNotes` stamps a note on a programmed lift, and `slotUpdates` can change sets, reps or RPE on that slot. `defaultSwaps` picks a variant (for example goblet squat for the back-squat slot) unless the athlete already chose one.
+- Optional `exercises` is a map of extra lift definitions, like `PROGRAM.alts`.
+- The public demo `coach.json` is unchanged (no `planDays`).
