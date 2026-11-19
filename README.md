@@ -179,3 +179,10 @@ This uses `navigator.share` (the iOS share sheet) and falls back to the clipboar
 - `blocks` replaces the day's blocks. Otherwise `warmup` replaces the warm-up, `addBlocks` inserts a block (`before` / `after` a block id, or at the end), `slotNotes` stamps a note on a programmed lift, and `slotUpdates` can change sets, reps or RPE on that slot. `defaultSwaps` picks a variant (for example goblet squat for the back-squat slot) unless the athlete already chose one.
 - Optional `exercises` is a map of extra lift definitions, like `PROGRAM.alts`.
 - The public demo `coach.json` is unchanged (no `planDays`).
+
+## v1.6.2: Garmin weight from coach.json
+
+- Private `coach.json` may include `weights`: `[{ "date": "YYYY-MM-DD", "lb": 180.4, "avg7": 180.7 }]`, about the last 30 days of Garmin weigh-ins (via Intervals.icu, already converted to lb). `avg7` is optional.
+- The Progress tab, Send to Coach, and the day-file weight line use the newest of those Garmin weights and any manual entries on the phone. A same-day manual log overrides Garmin for that date; otherwise Garmin fills in. Manual entry stays as a fallback when Garmin hasn't arrived.
+- The 7-day average uses the stored `avg7` when present, otherwise the average of merged weigh-ins in the last 7 days.
+- The public demo `coach.json` is unchanged (no `weights`). Refresh the private array with `tools/sync_weights.py`.

@@ -351,7 +351,7 @@ const COACH_DATA_FALLBACK = {
 /* ============================ storage ============================ */
 const LS_KEY = "mikecoach";
 const SCHEMA = 2;
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.6.2";
 
 function seedState() {
   return {
@@ -1421,9 +1421,34 @@ function foodText(date) {
   for (const lb of MEAL_LABELS) for (const m of ms.filter(x => x.label === lb)) L.push(`- ${cap(lb)}: ${m.name}${m.servings !== 1 ? " x" + fmtQ(m.servings) : ""}${m.note ? " (" + m.note + ")" : ""} = ${Math.round(m.kcal * m.servings)} kcal ${fmtN(m.p * m.servings)}P/${fmtN(m.c * m.servings)}C/${fmtN(m.f * m.servings)}F`);
   return L.join("\n");
 }
-function sortedBw() { return S.bodyweight.slice().sort((a, b) => a.date.localeCompare(b.date)); }
-function avg7(bw, date) { const xs = bw.filter(b => b.date <= date && b.date > addDays(date, -7)); return xs.length ? xs.reduce((a, b) => a + b.lb, 0) / xs.length : null; }
-function weightText() { const bw = sortedBw(); if (!bw.length) return ""; const l = bw[bw.length - 1]; return `Weight ${fmtDate(l.date, false)}: ${fmtN(l.lb)} lb (7-day avg ${fmtN(avg7(bw, l.date))})`; }
+/* Body weight: Garmin/Intervals series from private coach.json, merged with any
+   manual S.bodyweight entries. A same-day manual log overrides Garmin for that date;
+   otherwise Garmin fills in. Demo coach.json has no weights, so the phone falls back
+   to whatever was typed. */
+function coachWeights() {
+  const w = COACH && COACH.weights;
+  return Array.isArray(w) ? w.filter(b => b && b.date && b.lb != null && !isNaN(+b.lb)) : [];
+}
+function sortedBw() {
+  const map = {};
+  for (const b of coachWeights()) {
+    const rec = { date: b.date, lb: +b.lb, src: "garmin" };
+    if (b.avg7 != null && !isNaN(+b.avg7)) rec.avg7 = +b.avg7;
+    map[b.date] = rec;
+  }
+  for (const b of S.bodyweight) {
+    if (!b || !b.date || b.lb == null || isNaN(+b.lb)) continue;
+    map[b.date] = { date: b.date, lb: +b.lb, src: "manual" };
+  }
+  return Object.keys(map).sort().map(d => map[d]);
+}
+function avg7(bw, date) {
+  const hit = bw.find(b => b.date === date);
+  if (hit && hit.avg7 != null && !isNaN(+hit.avg7)) return +hit.avg7;
+  const xs = bw.filter(b => b.date <= date && b.date > addDays(date, -7));
+  return xs.length ? xs.reduce((a, b) => a + b.lb, 0) / xs.length : null;
+}
+function weightText() { const bw = sortedBw(); if (!bw.length) return ""; const l = bw[bw.length - 1]; const a = avg7(bw, l.date); return `Weight ${fmtDate(l.date, false)}: ${fmtN(l.lb)} lb` + (a != null ? ` (7-day avg ${fmtN(a)})` : ""); }
 function openShare(opt = {}) {
   const day = S.ui.day;
   let ws = opt.workout ? S.sessions.find(s => s.id === opt.workout) : null;
@@ -2072,11 +2097,11 @@ function viewProgress() {
   const weeksIn = Math.max(1, daysBetween(t0, today()) / 7);
   const pct = Math.max(0, Math.min(1, lost / (G.startLb - G.targetLb)));
   h += `<div class="sec"><span class="k">Body weight</span><span class="v">${G.startLb} → ${G.targetLb} lb by ${fmtDate(G.targetDate, false)}</span></div><div class="card">
-    <div class="bwnum"><div><b class="num">${lastBw ? fmtN(lastBw.lb) : "–"}</b><span>${lastBw ? fmtDate(lastBw.date, false).toUpperCase() : "LATEST"}</span></div><div><b class="num">${a7 ? fmtN(a7) : "–"}</b><span>7-DAY AVG</span></div><div><b class="num" style="color:var(--acc)">${fmtN(Math.max(0, (a7 || G.startLb) - G.targetLb))}</b><span>LB TO GO</span></div></div>
+    <div class="bwnum"><div><b class="num">${lastBw ? fmtN(lastBw.lb) : "–"}</b><span>${lastBw ? fmtDate(lastBw.date, false).toUpperCase() + (lastBw.src === "garmin" ? " · GARMIN" : "") : "LATEST"}</span></div><div><b class="num">${a7 ? fmtN(a7) : "–"}</b><span>7-DAY AVG</span></div><div><b class="num" style="color:var(--acc)">${fmtN(Math.max(0, (a7 || G.startLb) - G.targetLb))}</b><span>LB TO GO</span></div></div>
     <div class="bar" style="margin-top:10px"><i style="width:${pct * 100}%;background:var(--acc)"></i></div><div class="tiny muted" style="margin-top:4px">${fmtN(lost)} of ${G.startLb - G.targetLb} lb lost · ${Math.round(pct * 100)}%</div>
     ${lineChart({ series: [{ pts: [{ x: 0, y: G.startLb }, { x: xEnd, y: planAt(xEnd) }], color: "#6b6b72", dash: "5 5", width: 1.5 }, { pts: avg, color: "#c8f73a", width: 3 }, { pts, color: "#64d2ff", dots: true }], xmin: 0, xmax: xEnd, ymin: Math.floor(Math.min(...ys) - 1), ymax: Math.ceil(Math.max(...ys) + 1), xlabels: xl, hlines: [{ y: G.targetLb, color: "#30d158", label: "Goal " + G.targetLb }] })}
     <div class="legend"><span><i style="background:#64d2ff;height:8px;width:8px;border-radius:4px"></i>Weigh-ins</span><span><i style="background:#c8f73a"></i>7-day avg</span><span><i style="background:#6b6b72"></i>Plan ${fmtN((G.startLb - G.targetLb) / (span / 7))} lb/wk</span></div>
-    <div class="small muted" style="margin-top:8px">${bw.length < 7 ? "Weigh in every morning after the bathroom, before food. The 7-day average is the number that matters." : `Down ${fmtN(lost)} lb · ${fmtN(lost / weeksIn)} lb/week (target 0.5-1).`}</div>
+    <div class="small muted" style="margin-top:8px">${(() => { const g = coachWeights().length; const tip = g ? "Weight is pulled from Garmin. Log one here only if today's hasn't shown up yet." : (bw.length < 7 ? "Weigh in every morning after the bathroom, before food. The 7-day average is the number that matters." : ""); const trend = lastBw ? `Down ${fmtN(lost)} lb · ${fmtN(lost / weeksIn)} lb/week (target 0.5-1).` : ""; return g ? tip + (lastBw ? " " + trend : "") : (bw.length < 7 ? tip : trend); })()}</div>
     <button class="btn acc" style="margin-top:12px" data-act="log-bw">Log today's weight</button></div>`;
   // Strength: e1RM per lift (app logs + imported BTWB history)
   const lifts = knownExercises().filter(e => e.e1rm !== false);
@@ -2403,7 +2428,7 @@ function dayDoc(date) {
   const T = totals(r.m), G = PROGRAM.targets;
   const food = { entries: r.m.map(m => Object.assign({ id: m.id, label: m.label, name: m.name, servings: m.servings, per: { kcal: m.kcal, p: m.p, c: m.c, f: m.f }, total: { kcal: Math.round(m.kcal * m.servings), p: r1(m.p * m.servings), c: r1(m.c * m.servings), f: r1(m.f * m.servings) } }, m.note ? { note: m.note } : {}, m.serving ? { serving: m.serving } : {}, m.scan ? { barcode: m.scan } : {})),
     totals: { kcal: Math.round(T.kcal), p: r1(T.p), c: r1(T.c), f: r1(T.f) }, targets: G, left: { kcal: Math.round(G.kcal - T.kcal), p: r1(G.p - T.p), c: r1(G.c - T.c), f: r1(G.f - T.f) } };
-  const bw = r.b.length ? { lb: r.b[r.b.length - 1].lb, avg7: r1(avg7(sortedBw(), date)) } : null;
+  const allBw = sortedBw(); const l = allBw.find(b => b.date === date); const bw = l ? { lb: l.lb, avg7: r1(avg7(allBw, date)) } : null;
   const parts = [athleteName() + " → Coach"]; for (const w of ws.concat(live)) parts.push((w.inProgress ? "(in progress) " : "") + w.text);
   if (r.m.length) parts.push(foodText(date)); const wl = weightLine(date); if (wl) parts.push(wl);
   return { date, app: APP_VERSION, schema: 1, workouts: ws, inProgress: live, food, weight: bw, text: parts.join("\n\n") };
